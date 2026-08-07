@@ -6,15 +6,21 @@ from uuid import UUID
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
+import pytest
 
 from app import members
 from app.auth import AdminSession, require_session
+from app.login_security import DEVICE_COOKIE
+from app.models import PendingProjectInvitation
 from app.security import token_hash
 from conftest import make_settings
 
 ACTOR_ID = UUID("20000000-0000-4000-8000-000000000002")
 TARGET_ID = UUID("30000000-0000-4000-8000-000000000003")
 INVITATION_ID = UUID("40000000-0000-4000-8000-000000000004")
+NEWEST_AUDIT_ID = UUID("70000000-0000-4000-8000-000000000007")
+OLDER_AUDIT_ID = UUID("60000000-0000-4000-8000-000000000006")
 NOW = datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)
 RAW_TOKEN = "a" * 43
 
@@ -29,6 +35,8 @@ class MemberConnection:
         account_email: str = "invitee@example.com",
         target_roles: list[str] | None = None,
         target_is_owner: bool = False,
+        pending_blocked_reason: str | None = None,
+        membership_audit_rows: list[dict[str, object]] | None = None,
     ) -> None:
         self.actor_is_owner = actor_is_owner
         self.actor_roles = actor_roles or [
@@ -40,10 +48,18 @@ class MemberConnection:
         self.account_email = account_email
         self.target_roles = target_roles or ["config:read"]
         self.target_is_owner = target_is_owner
+        self.pending_blocked_reason = pending_blocked_reason
+        self.membership_audit_rows = (
+            membership_audit_rows
+            if membership_audit_rows is not None
+            else []
+        )
         self.membership_exists = False
         self.invitation_row: dict[str, object] | None = None
         self.statements: list[tuple[str, tuple[object, ...]]] = []
         self.audit_calls: list[tuple[object, ...]] = []
+        self.rate_bucket_attempts: dict[tuple[str, str], int] = {}
+        self.rate_bucket_started_at: dict[tuple[str, str], datetime] = {}
 
     @asynccontextmanager
     async def transaction(self):
@@ -52,7 +68,16 @@ class MemberConnection:
     async def fetchrow(self, query: str, *args):
         self.statements.append((query, args))
         if "INSERT INTO admin_login_rate_buckets" in query:
-            return {"window_started_at": NOW, "attempt_count": 1}
+            scope, key_hash, _, now = args
+            key = (str(scope), str(key_hash))
+            self.rate_bucket_attempts[key] = (
+                self.rate_bucket_attempts.get(key, 0) + 1
+            )
+            self.rate_bucket_started_at.setdefault(key, now)
+            return {
+                "window_started_at": self.rate_bucket_started_at[key],
+                "attempt_count": self.rate_bucket_attempts[key],
+            }
         if "AS is_owner" in query and "SELECT" in query:
             if "membership.created_at AS joined_at" in query:
                 return {
@@ -141,10 +166,20 @@ class MemberConnection:
                 {
                     **self.invitation_row,
                     "inviter_email": "owner@example.com",
+                    "blocked_reason": self.pending_blocked_reason,
                 }
             ]
         if "FROM admin_project_membership_audit" in query:
-            return []
+            before_created_at, before_audit_id, limit = args[1:]
+            rows = self.membership_audit_rows
+            if before_created_at is not None:
+                rows = [
+                    row
+                    for row in rows
+                    if (row["created_at"], row["audit_id"])
+                    < (before_created_at, before_audit_id)
+                ]
+            return rows[:limit]
         raise AssertionError(f"Unexpected fetch query: {query}")
 
     async def execute(self, query: str, *args):
@@ -191,9 +226,13 @@ def _client(
     connection: MemberConnection,
     *,
     session: AdminSession | None,
+    settings_overrides: dict[str, object] | None = None,
 ) -> TestClient:
     app = FastAPI()
-    app.state.settings = make_settings(registration_enabled=False)
+    app.state.settings = make_settings(
+        registration_enabled=False,
+        **(settings_overrides or {}),
+    )
     app.state.pg_pool = MemberPool(connection)
     app.include_router(members.router)
     if session is not None:
@@ -240,12 +279,87 @@ def test_invite_is_revealed_once_and_list_never_contains_secret_material() -> No
         "email",
         "roles",
         "inviter_email",
+        "status",
+        "blocked_reason",
         "expires_at",
         "created_at",
     }
+    assert pending["status"] == "valid"
+    assert pending["blocked_reason"] is None
     assert "invitation_url" not in pending
     assert "token" not in pending
     assert "token_hash" not in pending
+
+
+def test_pending_invitation_exposes_live_blocked_authority_state() -> None:
+    connection = MemberConnection(
+        pending_blocked_reason="inviter_lacks_members_manage"
+    )
+    connection.invitation_row = {
+        "invitation_id": INVITATION_ID,
+        "email": "invitee@example.com",
+        "roles": ["config:read"],
+        "expires_at": NOW + timedelta(days=7),
+        "created_at": NOW,
+    }
+    with _client(connection, session=_session("members-csrf")) as client:
+        listed = client.get("/api/projects/demo/members")
+
+    assert listed.status_code == 200
+    assert listed.json()["pending_invitations"] == [
+        {
+            "invitation_id": str(INVITATION_ID),
+            "email": "invitee@example.com",
+            "roles": ["config:read"],
+            "inviter_email": "owner@example.com",
+            "status": "blocked",
+            "blocked_reason": "inviter_lacks_members_manage",
+            "expires_at": "2026-08-06T12:00:00Z",
+            "created_at": "2026-07-30T12:00:00Z",
+        }
+    ]
+    invitation_query = next(
+        query
+        for query, _ in connection.statements
+        if "END AS blocked_reason" in query
+    )
+    assert "LEFT JOIN admin_user_projects AS inviter_membership" in invitation_query
+    assert "WHEN NOT inviter.active" in invitation_query
+    assert "ANY(inviter_membership.roles)" in invitation_query
+    assert "invitation.roles <@ inviter_membership.roles" in invitation_query
+    assert "project.owner_user_id IS DISTINCT FROM" in invitation_query
+    for reason in (
+        "inviter_inactive",
+        "inviter_not_project_member",
+        "inviter_lacks_members_manage",
+        "roles_exceed_inviter_authority",
+        "members_manage_requires_owner",
+    ):
+        assert reason in invitation_query
+
+
+@pytest.mark.parametrize(
+    "status, blocked_reason",
+    [
+        ("valid", "inviter_inactive"),
+        ("blocked", None),
+    ],
+)
+def test_pending_invitation_rejects_incoherent_status(
+    status: str,
+    blocked_reason: str | None,
+) -> None:
+    with pytest.raises(ValidationError, match="blocked_reason must be null"):
+        PendingProjectInvitation(
+            invitation_id=INVITATION_ID,
+            email="invitee@example.com",
+            roles=["config:read"],
+            inviter_email="owner@example.com",
+            status=status,
+            blocked_reason=blocked_reason,
+            expires_at=NOW + timedelta(days=7),
+            created_at=NOW,
+        )
 
 
 def test_invitation_roles_are_canonical_and_bounded_by_live_authority() -> None:
@@ -334,15 +448,48 @@ def test_wrong_email_and_invalid_lifecycle_use_same_unavailable_response() -> No
     }
 
 
+def test_invitation_rate_limit_does_not_consume_login_buckets() -> None:
+    connection = MemberConnection()
+    with _client(
+        connection,
+        session=None,
+        settings_overrides={
+            "invitation_global_rate_limit": 100,
+            "invitation_network_rate_limit": 100,
+            "invitation_token_rate_limit": 1,
+        },
+    ) as client:
+        accepted = client.get(f"/api/invitations/{RAW_TOKEN}")
+        throttled = client.get(f"/api/invitations/{RAW_TOKEN}")
+
+    assert accepted.status_code == 200
+    assert throttled.status_code == 429
+    assert throttled.headers["Retry-After"] == "60"
+    assert {scope for scope, _ in connection.rate_bucket_attempts} == {
+        "invitation_global",
+        "invitation_network",
+        "invitation_token",
+    }
+
+
 def test_invitation_registration_is_atomic_when_public_registration_is_disabled(
     monkeypatch,
 ) -> None:
     connection = MemberConnection()
+    built_sources = []
+    build_login_source = members.build_login_source
+
+    def record_login_source(*args, **kwargs):
+        source = build_login_source(*args, **kwargs)
+        built_sources.append(source)
+        return source
+
     monkeypatch.setattr(
         members,
         "hash_password",
         lambda password: f"$argon2id${password}",
     )
+    monkeypatch.setattr(members, "build_login_source", record_login_source)
     with _client(connection, session=None) as client:
         registered = client.post(
             f"/api/invitations/{RAW_TOKEN}/register",
@@ -374,6 +521,8 @@ def test_invitation_registration_is_atomic_when_public_registration_is_disabled(
     ]
     assert required_order == sorted(required_order)
     assert "apdl_admin_session" in registered.cookies
+    assert len(built_sources) == 1
+    assert registered.cookies[DEVICE_COOKIE] == built_sources[0].device_token
     assert len(connection.audit_calls) == 1
 
 
@@ -410,6 +559,84 @@ def test_role_replacement_and_removal_cannot_mutate_owner_or_delegated_manager()
             headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
         )
     assert replace_manager.status_code == remove_manager.status_code == 403
+
+
+def test_membership_audit_uses_keyset_pagination() -> None:
+    newest_at = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    older_at = datetime(2026, 7, 30, tzinfo=timezone.utc)
+    rows = [
+        {
+            "audit_id": NEWEST_AUDIT_ID,
+            "project_id": "demo",
+            "action": "roles_replace",
+            "actor_user_id": ACTOR_ID,
+            "actor_email": "owner@example.com",
+            "subject_user_id": TARGET_ID,
+            "subject_email": "target@example.com",
+            "invitation_id": None,
+            "previous_roles": ["config:read"],
+            "new_roles": ["config:read", "config:write"],
+            "created_at": newest_at,
+        },
+        {
+            "audit_id": OLDER_AUDIT_ID,
+            "project_id": "demo",
+            "action": "invitation_create",
+            "actor_user_id": ACTOR_ID,
+            "actor_email": "owner@example.com",
+            "subject_user_id": None,
+            "subject_email": "invitee@example.com",
+            "invitation_id": INVITATION_ID,
+            "previous_roles": None,
+            "new_roles": ["config:read"],
+            "created_at": older_at,
+        },
+    ]
+    connection = MemberConnection(membership_audit_rows=rows)
+    with _client(connection, session=_session("members-csrf")) as client:
+        first = client.get("/api/projects/demo/members/audit?limit=1")
+        cursor = first.json()["next_cursor"]
+        second = client.get(
+            "/api/projects/demo/members/audit",
+            params={
+                "limit": 1,
+                "before_created_at": cursor["created_at"],
+                "before_audit_id": cursor["audit_id"],
+            },
+        )
+        partial_cursor = client.get(
+            "/api/projects/demo/members/audit",
+            params={"before_created_at": "2026-08-01T00:00:00Z"},
+        )
+
+    assert [entry["action"] for entry in first.json()["entries"]] == [
+        "roles_replace"
+    ]
+    assert cursor == {
+        "created_at": "2026-08-01T00:00:00Z",
+        "audit_id": str(NEWEST_AUDIT_ID),
+    }
+    assert [entry["action"] for entry in second.json()["entries"]] == [
+        "invitation_create"
+    ]
+    assert second.json()["next_cursor"] is None
+    assert partial_cursor.status_code == 422
+    audit_queries = [
+        (query, args)
+        for query, args in connection.statements
+        if "FROM admin_project_membership_audit" in query
+    ]
+    assert all(
+        "(audit.created_at, audit.audit_id)" in query
+        for query, _ in audit_queries
+    )
+    assert audit_queries[0][1] == ("demo", None, None, 2)
+    assert audit_queries[1][1] == (
+        "demo",
+        newest_at,
+        NEWEST_AUDIT_ID,
+        2,
+    )
 
 
 def test_mutations_require_origin_csrf_and_strict_request_shapes() -> None:

@@ -387,11 +387,17 @@ CREATE TABLE codegen_llm_attempts (
     ),
     egress_at TIMESTAMPTZ,
     finished_at TIMESTAMPTZ,
-    latency_ms BIGINT CHECK (latency_ms IS NULL OR latency_ms >= 0),
-    input_tokens BIGINT CHECK (input_tokens IS NULL OR input_tokens >= 0),
-    output_tokens BIGINT CHECK (output_tokens IS NULL OR output_tokens >= 0),
-    cost_usd_micros BIGINT CHECK (
-        cost_usd_micros IS NULL OR cost_usd_micros >= 0
+    claimed_latency_ms BIGINT CHECK (
+        claimed_latency_ms IS NULL OR claimed_latency_ms >= 0
+    ),
+    claimed_input_tokens BIGINT CHECK (
+        claimed_input_tokens IS NULL OR claimed_input_tokens >= 0
+    ),
+    claimed_output_tokens BIGINT CHECK (
+        claimed_output_tokens IS NULL OR claimed_output_tokens >= 0
+    ),
+    claimed_cost_usd_micros BIGINT CHECK (
+        claimed_cost_usd_micros IS NULL OR claimed_cost_usd_micros >= 0
     ),
     error_classification TEXT CHECK (
         error_classification IS NULL OR error_classification IN (
@@ -442,20 +448,20 @@ CREATE TABLE codegen_llm_attempts (
             status = 'prepared'
             AND egress_at IS NULL
             AND finished_at IS NULL
-            AND latency_ms IS NULL
-            AND input_tokens IS NULL
-            AND output_tokens IS NULL
-            AND cost_usd_micros IS NULL
+            AND claimed_latency_ms IS NULL
+            AND claimed_input_tokens IS NULL
+            AND claimed_output_tokens IS NULL
+            AND claimed_cost_usd_micros IS NULL
             AND error_classification IS NULL
         )
         OR (
             status = 'in_flight'
             AND egress_at IS NOT NULL
             AND finished_at IS NULL
-            AND latency_ms IS NULL
-            AND input_tokens IS NULL
-            AND output_tokens IS NULL
-            AND cost_usd_micros IS NULL
+            AND claimed_latency_ms IS NULL
+            AND claimed_input_tokens IS NULL
+            AND claimed_output_tokens IS NULL
+            AND claimed_cost_usd_micros IS NULL
             AND error_classification IS NULL
             AND credential_id IS NOT NULL
         )
@@ -463,7 +469,7 @@ CREATE TABLE codegen_llm_attempts (
             status = 'succeeded'
             AND egress_at IS NOT NULL
             AND finished_at IS NOT NULL
-            AND latency_ms IS NOT NULL
+            AND claimed_latency_ms IS NOT NULL
             AND error_classification IS NULL
             AND credential_id IS NOT NULL
         )
@@ -471,54 +477,80 @@ CREATE TABLE codegen_llm_attempts (
             status = 'failed'
             AND egress_at IS NOT NULL
             AND finished_at IS NOT NULL
-            AND latency_ms IS NOT NULL
             AND error_classification IS NOT NULL
             AND credential_id IS NOT NULL
+            AND (
+                claimed_latency_ms IS NOT NULL
+                OR (
+                    claimed_latency_ms IS NULL
+                    AND claimed_input_tokens IS NULL
+                    AND claimed_output_tokens IS NULL
+                    AND claimed_cost_usd_micros IS NULL
+                    AND error_classification = 'unknown'
+                )
+            )
         )
         OR (
             status = 'blocked'
             AND egress_at IS NULL
             AND finished_at IS NOT NULL
-            AND latency_ms IS NULL
-            AND input_tokens IS NULL
-            AND output_tokens IS NULL
-            AND cost_usd_micros IS NULL
+            AND claimed_latency_ms IS NULL
+            AND claimed_input_tokens IS NULL
+            AND claimed_output_tokens IS NULL
+            AND claimed_cost_usd_micros IS NULL
             AND error_classification IS NOT NULL
         )
         OR (
             status = 'cancelled'
             AND finished_at IS NOT NULL
+            AND error_classification IS NOT NULL
             AND error_classification = 'cancelled'
             AND (
                 (
                     egress_at IS NULL
-                    AND latency_ms IS NULL
-                    AND input_tokens IS NULL
-                    AND output_tokens IS NULL
-                    AND cost_usd_micros IS NULL
+                    AND claimed_latency_ms IS NULL
+                    AND claimed_input_tokens IS NULL
+                    AND claimed_output_tokens IS NULL
+                    AND claimed_cost_usd_micros IS NULL
                 )
                 OR (
                     egress_at IS NOT NULL
-                    AND latency_ms IS NOT NULL
                     AND credential_id IS NOT NULL
                     AND credential_version IS NOT NULL
+                    AND (
+                        claimed_latency_ms IS NOT NULL
+                        OR (
+                            claimed_input_tokens IS NULL
+                            AND claimed_output_tokens IS NULL
+                            AND claimed_cost_usd_micros IS NULL
+                        )
+                    )
                 )
             )
         )
     ),
-    CONSTRAINT codegen_llm_attempts_usage_shape_check CHECK (
+    CONSTRAINT codegen_llm_attempts_claimed_usage_shape_check CHECK (
         (
-            input_tokens IS NULL
-            AND output_tokens IS NULL
-            AND cost_usd_micros IS NULL
+            claimed_input_tokens IS NULL
+            AND claimed_output_tokens IS NULL
+            AND claimed_cost_usd_micros IS NULL
         )
         OR (
-            input_tokens IS NOT NULL
-            AND output_tokens IS NOT NULL
-            AND cost_usd_micros IS NOT NULL
+            claimed_input_tokens IS NOT NULL
+            AND claimed_output_tokens IS NOT NULL
+            AND claimed_cost_usd_micros IS NOT NULL
         )
     )
 );
+
+COMMENT ON COLUMN codegen_llm_attempts.claimed_latency_ms IS
+    'Untrusted worker claim; informational only, never billing or policy authority';
+COMMENT ON COLUMN codegen_llm_attempts.claimed_input_tokens IS
+    'Untrusted worker claim; informational only, never billing or policy authority';
+COMMENT ON COLUMN codegen_llm_attempts.claimed_output_tokens IS
+    'Untrusted worker claim; informational only, never billing or policy authority';
+COMMENT ON COLUMN codegen_llm_attempts.claimed_cost_usd_micros IS
+    'Derived from untrusted worker token claims; never billing or policy authority';
 
 CREATE OR REPLACE FUNCTION apdl_validate_codegen_llm_attempt_snapshot()
 RETURNS TRIGGER

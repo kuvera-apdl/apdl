@@ -25,18 +25,21 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol, TypeVar, cast
 
 import anthropic
-import httpx
 import openai
 from google import genai
 from google.genai import types as genai_types
 
+from app.llm.client_cache import (
+    ProviderClientIdentity,
+    ProviderClientLease,
+    ProviderClientRetiredError,
+)
 from app.llm.contracts import (
     ErrorClassification,
     LlmBudgetExceededError,
@@ -47,6 +50,7 @@ from app.llm.contracts import (
     LlmPolicyDeniedError,
     LlmRequestContext,
     LlmRunInactiveError,
+    PreparedLlmAttempt,
     canonical_prompt_bytes,
     classify_provider_error,
     conservative_input_token_bound,
@@ -55,7 +59,6 @@ from app.llm.contracts import (
 from app.store.llm_credentials import (
     CredentialConfigurationError,
     CredentialStoreError,
-    ProjectCredentialStore,
 )
 from app.store.llm_governance import (
     begin_llm_call,
@@ -70,75 +73,10 @@ from app.store.llm_governance import (
 
 logger = logging.getLogger(__name__)
 
-#: Per-request timeout. Without one, SDK defaults (~10 min) mean a hung
-#: provider stalls an agent run for up to 10 minutes per fallback rung.
-_REQUEST_TIMEOUT = float(os.getenv("LLM_REQUEST_TIMEOUT_SECONDS", "120"))
-
-def _normalized_endpoint_url(value: str) -> str:
-    raw = value.strip().rstrip("/")
-    try:
-        parsed = httpx.URL(raw)
-    except Exception as exc:
-        raise ValueError("LLM provider endpoint is not a valid URL") from exc
-    if parsed.scheme not in {"http", "https"} or not parsed.host:
-        raise ValueError("LLM provider endpoint must be an absolute HTTP(S) URL")
-    if parsed.userinfo:
-        raise ValueError("LLM provider endpoint must not contain user information")
-    if parsed.query or parsed.fragment:
-        raise ValueError(
-            "LLM provider endpoint must not contain query or fragment data"
-        )
-    return str(parsed).rstrip("/")
-
-
-def _get_openai(api_key: str, endpoint_url: str) -> openai.AsyncOpenAI:
-    return openai.AsyncOpenAI(
-        api_key=api_key,
-        base_url=_normalized_endpoint_url(endpoint_url),
-        timeout=_REQUEST_TIMEOUT,
-    )
-
-
-def _get_anthropic(
-    api_key: str,
-    endpoint_url: str,
-) -> anthropic.AsyncAnthropic:
-    return anthropic.AsyncAnthropic(
-        api_key=api_key,
-        base_url=_normalized_endpoint_url(endpoint_url),
-        timeout=_REQUEST_TIMEOUT,
-    )
-
-
-def _get_google(api_key: str, endpoint_url: str) -> genai.Client:
-    return genai.Client(
-        api_key=api_key,
-        http_options=genai_types.HttpOptions(
-            base_url=_normalized_endpoint_url(endpoint_url),
-            timeout=int(_REQUEST_TIMEOUT * 1000),
-        ),
-    )
-
-
-def _get_xai(api_key: str, endpoint_url: str) -> openai.AsyncOpenAI:
-    return openai.AsyncOpenAI(
-        api_key=api_key,
-        base_url=_normalized_endpoint_url(endpoint_url),
-        timeout=_REQUEST_TIMEOUT,
-    )
-
-
-def _get_local(endpoint_url: str) -> openai.AsyncOpenAI:
-    return openai.AsyncOpenAI(
-        base_url=_normalized_endpoint_url(endpoint_url),
-        api_key="local",  # local servers don't require a real key
-        timeout=_REQUEST_TIMEOUT,
-    )
-
 
 async def _load_attempt_api_key(
     context: LlmRequestContext,
-    prepared,
+    prepared: PreparedLlmAttempt,
 ) -> str | None:
     """Decrypt exactly the credential version reserved for this attempt."""
     provider = prepared.provider_policy.provider
@@ -149,18 +87,14 @@ async def _load_attempt_api_key(
             "Project provider credential binding is unavailable"
     )
     try:
-        store = ProjectCredentialStore.from_environment()
-        try:
-            credential = await store.load_active(
-                context.project_id,
-                provider,
-                credential_id=prepared.credential_id,
-                credential_version=prepared.credential_version,
-                execution_id=str(prepared.attempt_id),
-                purpose=context.purpose,
-            )
-        finally:
-            await store.aclose()
+        credential = await context.llm_runtime.credential_store.load_active(
+            context.project_id,
+            provider,
+            credential_id=prepared.credential_id,
+            credential_version=prepared.credential_version,
+            execution_id=str(prepared.attempt_id),
+            purpose=context.purpose,
+        )
     except (CredentialConfigurationError, CredentialStoreError) as exc:
         raise LlmCredentialUnavailableError(
             "Project provider credential is unavailable"
@@ -170,6 +104,29 @@ async def _load_attempt_api_key(
             "Project provider credential version changed before egress"
         )
     return credential.api_key
+
+
+async def _acquire_provider_client(
+    context: LlmRequestContext,
+    prepared: PreparedLlmAttempt,
+    api_key: str | None,
+) -> ProviderClientLease:
+    """Lease the exact versioned provider transport for this attempt."""
+    policy = prepared.provider_policy
+    identity = ProviderClientIdentity(
+        project_id=context.project_id,
+        provider=policy.provider,
+        endpoint_url=policy.endpoint_url,
+        credential_id=prepared.credential_id,
+        credential_version=prepared.credential_version,
+        connection_version=prepared.connection_version,
+    )
+    try:
+        return await context.llm_runtime.provider_clients.acquire(identity, api_key)
+    except ProviderClientRetiredError as exc:
+        raise LlmCredentialUnavailableError(
+            "Project provider connection was superseded before egress"
+        ) from exc
 
 
 _TIER_DEFAULTS: dict[str, dict[str, Any]] = {
@@ -246,13 +203,9 @@ async def _openai_completion(
     model: str,
     messages: list[dict[str, str]],
     *,
-    api_key: str | None,
-    endpoint_url: str,
+    client: openai.AsyncOpenAI,
     **kwargs: Any,
 ) -> TextCompletion:
-    if api_key is None:
-        raise LlmCredentialUnavailableError("OpenAI credential is unavailable")
-    client = _get_openai(api_key, endpoint_url)
     if _is_openai_reasoning_model(model):
         # Reasoning-family models 400 on `max_tokens` (they take
         # `max_completion_tokens`) and on any non-default temperature — the
@@ -275,13 +228,9 @@ async def _anthropic_completion(
     model: str,
     messages: list[dict[str, str]],
     *,
-    api_key: str | None,
-    endpoint_url: str,
+    client: anthropic.AsyncAnthropic,
     **kwargs: Any,
 ) -> TextCompletion:
-    if api_key is None:
-        raise LlmCredentialUnavailableError("Anthropic credential is unavailable")
-    client = _get_anthropic(api_key, endpoint_url)
     system_text = ""
     chat_messages: list[dict[str, str]] = []
     for msg in messages:
@@ -313,13 +262,9 @@ async def _google_completion(
     model: str,
     messages: list[dict[str, str]],
     *,
-    api_key: str | None,
-    endpoint_url: str,
+    client: genai.Client,
     **kwargs: Any,
 ) -> TextCompletion:
-    if api_key is None:
-        raise LlmCredentialUnavailableError("Google credential is unavailable")
-    client = _get_google(api_key, endpoint_url)
     system_instruction: str | None = None
     contents: list[dict[str, Any]] = []
     for msg in messages:
@@ -354,15 +299,11 @@ async def _xai_completion(
     model: str,
     messages: list[dict[str, str]],
     *,
-    api_key: str | None,
-    endpoint_url: str,
+    client: openai.AsyncOpenAI,
     **kwargs: Any,
 ) -> TextCompletion:
     # xAI's Chat Completions endpoint implements the OpenAI wire contract,
     # including usage fields and client-side function calling.
-    if api_key is None:
-        raise LlmCredentialUnavailableError("xAI credential is unavailable")
-    client = _get_xai(api_key, endpoint_url)
     resp = await client.chat.completions.create(
         model=model, messages=messages, **kwargs
     )
@@ -378,15 +319,9 @@ async def _local_completion(
     model: str,
     messages: list[dict[str, str]],
     *,
-    api_key: str | None,
-    endpoint_url: str,
+    client: openai.AsyncOpenAI,
     **kwargs: Any,
 ) -> TextCompletion:
-    if api_key is not None:
-        raise LlmCredentialUnavailableError(
-            "Local provider must not receive a cloud credential"
-        )
-    client = _get_local(endpoint_url)
     resp = await client.chat.completions.create(
         model=model, messages=messages, **kwargs
     )
@@ -440,7 +375,7 @@ async def _route_project_assignment(
     prompt_bytes: bytes,
     operation: str,
     invoke: Callable[
-        [str, str, str, str | None, dict[str, Any]],
+        [str, str, Any, dict[str, Any]],
         Awaitable[_CompletionT],
     ],
     kwargs: dict[str, Any],
@@ -531,10 +466,17 @@ async def _route_project_assignment(
         )
         raise
 
+    lease: ProviderClientLease | None = None
     try:
         api_key = await _load_attempt_api_key(context, prepared)
+        # Capacity waits and SDK construction are still pre-egress. The durable
+        # attempt becomes in-flight only once an exact client lease is ready.
+        lease = await _acquire_provider_client(context, prepared, api_key)
         await mark_provider_egress(context, attempt_id=prepared.attempt_id)
     except asyncio.CancelledError:
+        if lease is not None:
+            await lease.retire()
+            await lease.release()
         await block_provider_attempt_before_egress(
             context,
             attempt_id=prepared.attempt_id,
@@ -550,6 +492,9 @@ async def _route_project_assignment(
         )
         raise
     except LlmGovernanceError as exc:
+        if lease is not None:
+            await lease.retire()
+            await lease.release()
         classification = _governance_error_classification(exc)
         await block_provider_attempt_before_egress(
             context,
@@ -565,16 +510,56 @@ async def _route_project_assignment(
             error_message=str(exc),
         )
         raise
-
-    started = time.monotonic()
-    try:
-        result = await invoke(
+    except Exception as exc:
+        if lease is not None:
+            await lease.retire()
+            await lease.release()
+        disposition = classify_provider_error(exc)
+        error_message = (
+            f"{type(exc).__name__} before provider egress "
+            f"({disposition.classification})"
+        )
+        await block_provider_attempt_before_egress(
+            context,
+            attempt_id=prepared.attempt_id,
+            error_classification=disposition.classification,
+            error_message=error_message,
+        )
+        await finish_llm_call(
+            context,
+            call_id=call_id,
+            status="blocked",
+            error_classification=disposition.classification,
+            error_message=error_message,
+        )
+        logger.warning(
+            "LLM %s could not prepare provider client "
+            "(provider=%s, model=%s, classification=%s, exception_type=%s)",
+            operation,
             provider,
             model,
-            assignment.endpoint_url,
-            api_key,
-            dict(merged),
+            disposition.classification,
+            type(exc).__name__,
         )
+        raise RuntimeError(
+            f"LLM {operation} failed before provider egress "
+            f"({provider}/{model}, {disposition.classification})"
+        ) from exc
+
+    assert lease is not None
+    started = time.monotonic()
+    try:
+        try:
+            result = await invoke(
+                provider,
+                model,
+                lease.client,
+                dict(merged),
+            )
+        finally:
+            # The network operation is complete; do not hold scarce transport
+            # capacity while PostgreSQL finalization runs.
+            await lease.release()
     except asyncio.CancelledError:
         latency_ms = int((time.monotonic() - started) * 1000)
         await finish_provider_attempt(
@@ -630,7 +615,6 @@ async def _route_project_assignment(
             f"LLM {operation} failed "
             f"({provider}/{model}, {disposition.classification})"
         ) from exc
-
     latency_ms = int((time.monotonic() - started) * 1000)
     try:
         await finish_provider_attempt(
@@ -688,15 +672,13 @@ async def chat_completion(
     async def invoke(
         provider: str,
         model: str,
-        endpoint_url: str,
-        api_key: str | None,
+        client: Any,
         provider_kwargs: dict[str, Any],
     ) -> TextCompletion:
         return await _PROVIDER_FN[provider](
             model,
             messages,
-            api_key=api_key,
-            endpoint_url=endpoint_url,
+            client=client,
             **provider_kwargs,
         )
 
@@ -1096,39 +1078,9 @@ async def chat_completion_with_tools(
     async def invoke(
         provider: str,
         model: str,
-        endpoint_url: str,
-        api_key: str | None,
+        client: Any,
         provider_kwargs: dict[str, Any],
     ) -> ToolCompletion:
-        if provider == "openai":
-            if api_key is None:
-                raise LlmCredentialUnavailableError(
-                    "OpenAI credential is unavailable"
-                )
-            client = _get_openai(api_key, endpoint_url)
-        elif provider == "anthropic":
-            if api_key is None:
-                raise LlmCredentialUnavailableError(
-                    "Anthropic credential is unavailable"
-                )
-            client = _get_anthropic(api_key, endpoint_url)
-        elif provider == "google":
-            if api_key is None:
-                raise LlmCredentialUnavailableError(
-                    "Google credential is unavailable"
-                )
-            client = _get_google(api_key, endpoint_url)
-        elif provider == "xai":
-            if api_key is None:
-                raise LlmCredentialUnavailableError("xAI credential is unavailable")
-            client = _get_xai(api_key, endpoint_url)
-        else:  # local — OpenAI-compatible servers speak the tools dialect
-            if api_key is not None:
-                raise LlmCredentialUnavailableError(
-                    "Local provider must not receive a cloud credential"
-                )
-            client = _get_local(endpoint_url)
-
         if provider == "anthropic":
             return await _anthropic_completion_tools(
                 model,

@@ -65,6 +65,14 @@ before starting an ordinary host-run service. Agents must instead use the
 service runner and Compose do this automatically. Use the `apdl_llm_vault` URL
 only for the vault and its offline key-rotation command.
 
+Keep `APDL_LLM_VAULT_POSTGRES_PASSWORD` available to every supported
+PostgreSQL migration run, not only the initial bootstrap or migration 056. The
+migrator reconciles the `apdl_llm_vault` login password before it plans or
+applies migrations. Omitting the variable activates only the schema-validation
+path, skips password reconciliation, and can leave the database role out of sync
+with the vault service's `POSTGRES_URL`. Supply the same explicit password to
+both boundaries on every deployment migration.
+
 `infra/docker/postgres/init-apdl-roles.sh` is strictly a fresh-`initdb`
 bootstrap. For an existing database with an exact checksummed migration-ledger
 prefix, the PostgreSQL migrator provisions and validates `apdl_agents`,
@@ -133,6 +141,40 @@ rows and consume material WAL, temporary disk, and replica time. This release
 does not qualify that upgrade path: the migration is covered only as part of a
 fresh, empty canonical sequence. Do not use the fresh-cluster role bootstrap or
 migration `044` as an in-place upgrade procedure.
+
+### Migration 051 is an explicit Agents setup cutover
+
+Migration `051_agents_project_setup.sql` deliberately deactivates every Agents
+project and removes the pre-cutover tier assignments, runtime provider-policy
+copies, and model inventories that lack reviewed catalog pricing. It preserves
+positive project and per-run limits; only rows retaining a non-positive
+bootstrap limit receive the new defaults. The provider connections themselves
+remain, but their model projections must be refreshed against the deployed
+catalog before an owner can select both tiers and reactivate analysis.
+
+Stop Agents workers before applying this cutover. Record the projects and
+providers that must be reconfigured, apply the migration, deploy a release with
+current reviewed price metadata, refresh each inventory, reselect both model
+tiers, and reactivate deliberately. There is no live provider-pricing lookup:
+release maintainers own catalog price updates and operators must keep a project
+inactive whenever those values are known to be stale.
+
+Migration checksums are immutable. A development database that applied an
+earlier, unmerged form of migration 051 must be rebuilt from an empty database;
+the migration ledger intentionally rejects that checksum drift.
+
+### Migration 056 requires a fresh database
+
+Migration `056_project_llm_credential_vault.sql` replaces the separate Agents
+and Codegen credential stores with one shared vault. It rejects any row in
+either legacy credential table, including replaced or revoked history. Those
+rows retain credential lineage after their secret bytes are crypto-shredded,
+and the migration cannot rebind that lineage safely to the new empty vault.
+
+Revocation is therefore not a remediation for an existing database. Initialize
+a fresh PostgreSQL database, apply the complete canonical migration sequence,
+and reconnect provider credentials through the shared vault. There is no
+supported in-place conversion or dual-schema compatibility mode.
 
 ## Failure and rerun
 

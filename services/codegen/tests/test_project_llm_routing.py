@@ -11,15 +11,25 @@ from tempfile import TemporaryDirectory
 from uuid import UUID
 
 import pytest
+from pydantic import ValidationError
 
 from app.editor import routed as routed_module
 from app.editor.base import EditRequest, EditResult
 from app.editor.routed import ProjectRoutedEditor
 from app.llm import broker as broker_module
-from app.llm.broker import LlmAttemptBroker, LlmBrokerClient, _AcquireRequest
+from app.llm.broker import (
+    LlmAttemptBroker,
+    LlmBrokerClient,
+    LlmBrokerError,
+    _AcquireRequest,
+    _FinishRequest,
+    _SuccessResponse,
+    _round_claimed_cost_usd_micros,
+)
 from app.llm.broker_directory import prepare_broker_root
 from app.llm.contracts import (
     LlmAssignmentSnapshot,
+    LlmAttemptLease,
     LlmExecutionAuthority,
     LlmExecutionSnapshot,
     LlmRuntimeBinding,
@@ -76,6 +86,66 @@ def _assignment(role: str) -> LlmAssignmentSnapshot:
         input_cost_per_million_tokens_usd_micros=250_000,
         output_cost_per_million_tokens_usd_micros=2_000_000,
     )
+
+
+def test_plaintext_lease_is_serialized_but_omitted_from_repr() -> None:
+    response = _SuccessResponse(
+        lease=LlmAttemptLease(
+            attempt_id=ATTEMPT_ID,
+            phase="edit",
+            binding=_attempt().binding,
+        )
+    )
+
+    assert SECRET in response.model_dump_json()
+    assert SECRET not in repr(response)
+
+
+def test_broker_v2_accepts_only_canonical_claimed_usage_fields() -> None:
+    canonical = {
+        "schema_version": "codegen_llm_broker_request@2",
+        "action": "finish",
+        "token": "t" * 43,
+        "changeset_id": "changeset-1",
+        "attempt_id": ATTEMPT_ID,
+        "status": "succeeded",
+        "claimed_latency_ms": 12,
+        "claimed_input_tokens": 9,
+        "claimed_output_tokens": 20,
+        "error_classification": None,
+    }
+
+    parsed = _FinishRequest.model_validate(canonical)
+    assert parsed.claimed_input_tokens == 9
+    with pytest.raises(ValidationError):
+        _FinishRequest.model_validate(
+            {**canonical, "schema_version": "codegen_llm_broker_request@1"}
+        )
+    legacy = {
+        key: value
+        for key, value in canonical.items()
+        if not key.startswith("claimed_")
+    }
+    legacy.update(latency_ms=12, input_tokens=9, output_tokens=20)
+    with pytest.raises(ValidationError):
+        _FinishRequest.model_validate(legacy)
+
+
+@pytest.mark.parametrize(
+    ("numerator", "expected"),
+    [
+        (1, 0),
+        (499_999, 0),
+        (500_000, 1),
+        (1_499_999, 1),
+        (1_500_000, 2),
+    ],
+)
+def test_claimed_cost_rounds_to_nearest_micro(
+    numerator: int,
+    expected: int,
+) -> None:
+    assert _round_claimed_cost_usd_micros(numerator) == expected
 
 
 def _execution_snapshot() -> LlmExecutionSnapshot:
@@ -190,7 +260,7 @@ async def test_broker_acquire_terminalizes_registered_attempt_before_unwind(
         allowed_phases=("brief", "edit", "review"),
     )
     request = _AcquireRequest(
-        schema_version="codegen_llm_broker_request@1",
+        schema_version="codegen_llm_broker_request@2",
         action="acquire",
         token="t" * 43,
         changeset_id="changeset-1",
@@ -277,8 +347,8 @@ async def test_broker_unix_socket_acquire_finish_round_trip(
                 started_at,
                 status="succeeded",
                 error_classification=None,
-                input_tokens=10,
-                output_tokens=20,
+                claimed_input_tokens=9,
+                claimed_output_tokens=20,
             )
         finally:
             await broker.close()
@@ -288,13 +358,210 @@ async def test_broker_unix_socket_acquire_finish_round_trip(
         {
             "attempt_id": ATTEMPT_ID,
             "status": "succeeded",
-            "latency_ms": 0,
-            "input_tokens": 10,
-            "output_tokens": 20,
-            "cost_usd_micros": 43,
+            "claimed_latency_ms": 0,
+            "claimed_input_tokens": 9,
+            "claimed_output_tokens": 20,
+            "claimed_cost_usd_micros": 42,
             "error_classification": None,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_broker_bounds_idle_connections_and_closes_them_promptly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configured_backlogs: list[object] = []
+    real_start_unix_server = asyncio.start_unix_server
+
+    async def start_unix_server(
+        *args: object,
+        **kwargs: object,
+    ) -> asyncio.AbstractServer:
+        configured_backlogs.append(kwargs.get("backlog"))
+        return await real_start_unix_server(*args, **kwargs)
+
+    monkeypatch.setattr(
+        broker_module.asyncio,
+        "start_unix_server",
+        start_unix_server,
+    )
+    clients: list[tuple[asyncio.StreamReader, asyncio.StreamWriter]] = []
+    with TemporaryDirectory(prefix="apdl-broker-bounds-", dir="/tmp") as directory:
+        broker_root = Path(directory) / "broker-root"
+        prepare_broker_root(broker_root)
+        socket_path = broker_root / ("c" * 24) / "broker.sock"
+        broker = LlmAttemptBroker(
+            pool=object(),
+            credential_store=object(),  # type: ignore[arg-type]
+            changeset_id="changeset-1",
+            socket_path=socket_path,
+            token="t" * 43,
+            allowed_phases=("edit",),
+        )
+
+        await broker.start()
+        try:
+            for _ in range(broker_module._MAX_BROKER_HANDLERS):
+                clients.append(
+                    await asyncio.open_unix_connection(socket_path.as_posix())
+                )
+            async with asyncio.timeout(1.0):
+                while len(broker._handlers) < broker_module._MAX_BROKER_HANDLERS:
+                    await asyncio.sleep(0)
+            assert len(broker._handlers) == broker_module._MAX_BROKER_HANDLERS
+
+            overflow = await asyncio.open_unix_connection(socket_path.as_posix())
+            clients.append(overflow)
+            assert await asyncio.wait_for(overflow[0].read(1), timeout=1.0) == b""
+            assert len(broker._handlers) == broker_module._MAX_BROKER_HANDLERS
+
+            await asyncio.wait_for(broker.close(), timeout=1.0)
+            assert broker._handlers == set()
+            assert broker._active == {}
+            assert not socket_path.parent.exists()
+        finally:
+            if broker._server is not None:
+                await broker.close()
+            for _, writer in clients:
+                writer.close()
+            await asyncio.gather(
+                *(writer.wait_closed() for _, writer in clients),
+                return_exceptions=True,
+            )
+
+    assert configured_backlogs == [broker_module._BROKER_BACKLOG]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shutdown_cancelled", [False, True])
+async def test_broker_close_preserves_terminalization_reason_and_barrier(
+    monkeypatch: pytest.MonkeyPatch,
+    shutdown_cancelled: bool,
+) -> None:
+    prepare_entered = asyncio.Event()
+    prepare_release = asyncio.Event()
+    cleanup_entered = asyncio.Event()
+    cleanup_release = asyncio.Event()
+    terminalized = asyncio.Event()
+    cleanup_reasons: list[bool] = []
+
+    async def prepare(*args: object, **kwargs: object) -> PreparedLlmAttempt:
+        prepare_entered.set()
+        await prepare_release.wait()
+        return _attempt()
+
+    async def mark(*args: object, **kwargs: object) -> None:
+        raise AssertionError("closing broker must not mark new egress")
+
+    async def abandon(
+        pool: object,
+        *,
+        attempt_id: UUID,
+        cancelled: bool,
+    ) -> None:
+        assert attempt_id == ATTEMPT_ID
+        cleanup_reasons.append(cancelled)
+        cleanup_entered.set()
+        await cleanup_release.wait()
+        terminalized.set()
+
+    monkeypatch.setattr(broker_module, "prepare_llm_attempt", prepare)
+    monkeypatch.setattr(broker_module, "mark_llm_egress", mark)
+    monkeypatch.setattr(broker_module, "abandon_llm_attempt", abandon)
+    acquire_task: asyncio.Task[tuple[LlmAttemptLease, float]] | None = None
+    close_task: asyncio.Task[None] | None = None
+    with TemporaryDirectory(prefix="apdl-broker-close-", dir="/tmp") as directory:
+        broker_root = Path(directory) / "broker-root"
+        prepare_broker_root(broker_root)
+        socket_path = broker_root / ("d" * 24) / "broker.sock"
+        token = "t" * 43
+        broker = LlmAttemptBroker(
+            pool=object(),
+            credential_store=object(),  # type: ignore[arg-type]
+            changeset_id="changeset-1",
+            socket_path=socket_path,
+            token=token,
+            allowed_phases=("edit",),
+        )
+        client = LlmBrokerClient(
+            LlmExecutionAuthority(
+                socket_path=socket_path.as_posix(),
+                token=token,
+                editor_model="openai/gpt-5.4-mini",
+                helper_model="openai/gpt-5.4-nano",
+                allowed_phases=("brief", "edit", "review"),
+            ),
+            "changeset-1",
+        )
+
+        await broker.start()
+        try:
+            acquire_task = asyncio.create_task(client.acquire("edit"))
+            await asyncio.wait_for(prepare_entered.wait(), timeout=1.0)
+            close_task = asyncio.create_task(
+                broker.close(cancelled=shutdown_cancelled)
+            )
+            await asyncio.sleep(0)
+            assert not close_task.done()
+
+            prepare_release.set()
+            await asyncio.wait_for(cleanup_entered.wait(), timeout=1.0)
+            await asyncio.sleep(0)
+            assert not close_task.done()
+            assert cleanup_reasons == [shutdown_cancelled]
+
+            cleanup_release.set()
+            await asyncio.wait_for(close_task, timeout=1.0)
+            with pytest.raises(LlmBrokerError):
+                await acquire_task
+            assert terminalized.is_set()
+            assert broker._active == {}
+        finally:
+            prepare_release.set()
+            cleanup_release.set()
+            if broker._server is not None:
+                await broker.close(cancelled=shutdown_cancelled)
+            if close_task is not None and not close_task.done():
+                await asyncio.gather(close_task, return_exceptions=True)
+            if acquire_task is not None and not acquire_task.done():
+                acquire_task.cancel()
+                await asyncio.gather(acquire_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_controller_abandonment_does_not_invent_usage_claims() -> None:
+    statements: list[str] = []
+
+    class Connection:
+        async def execute(self, query: str, *args: object) -> None:
+            statements.append(query)
+
+    class Acquisition:
+        async def __aenter__(self) -> Connection:
+            return Connection()
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+    class Pool:
+        def acquire(self) -> Acquisition:
+            return Acquisition()
+
+    await llm_routing.abandon_llm_attempt(
+        Pool(),
+        attempt_id=ATTEMPT_ID,
+        cancelled=False,
+    )
+
+    assert len(statements) == 1
+    for field in (
+        "claimed_latency_ms",
+        "claimed_input_tokens",
+        "claimed_output_tokens",
+        "claimed_cost_usd_micros",
+    ):
+        assert field not in statements[0]
 
 
 @pytest.mark.asyncio
@@ -556,6 +823,32 @@ def test_snapshot_sql_requires_canonical_integer_json_numbers() -> None:
             f"assignment->>'{field}'\n"
             "        ) ~ '^(0|[1-9][0-9]*)$'"
         ) in assignment_migration
+
+    for field in (
+        "claimed_latency_ms",
+        "claimed_input_tokens",
+        "claimed_output_tokens",
+        "claimed_cost_usd_micros",
+    ):
+        assert field in assignment_migration
+    for legacy_field in (
+        "latency_ms",
+        "input_tokens",
+        "output_tokens",
+        "cost_usd_micros",
+    ):
+        assert (
+            re.search(
+                rf"(?<!claimed_)\b{legacy_field}\b",
+                assignment_migration,
+            )
+            is None
+        )
+    assert "Untrusted worker claim" in assignment_migration
+    assert (
+        "error_classification IS NOT NULL\n"
+        "            AND error_classification = 'cancelled'"
+    ) in assignment_migration
 
 
 def test_runtime_queries_never_row_lock_read_only_vault_authority() -> None:

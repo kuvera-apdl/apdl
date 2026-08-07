@@ -1,9 +1,9 @@
-"""Per-call Unix-socket broker for project-scoped Codegen LLM authority.
+"""Unix-socket broker for project-scoped Codegen LLM authority.
 
-The controller owns PostgreSQL and the platform encryption key. Isolated
-workers receive only a random, changeset-bound socket capability. Every model
-invocation acquires one credential lease immediately before egress and reports
-that exact attempt's terminal outcome afterward.
+A worker starts with a random, changeset-bound socket capability. A successful
+acquire then serializes one attempt-scoped plaintext provider credential to that
+worker. The production secret boundary is the worker's attested network policy,
+not the lease or this cooperative client's reference lifetime.
 """
 
 from __future__ import annotations
@@ -46,6 +46,9 @@ from app.store.llm_routing import (
 MAX_BROKER_MESSAGE_BYTES = 32 * 1024
 _BROKER_CHILD = re.compile(r"^[0-9a-f]{24}$")
 _BROKER_SOCKET_NAME = "broker.sock"
+_BROKER_BACKLOG = 8
+_MAX_BROKER_HANDLERS = 8
+_TOKENS_PER_MILLION = 1_000_000
 
 TerminalStatus = Literal["succeeded", "failed", "cancelled"]
 ErrorClassification = Literal[
@@ -63,6 +66,11 @@ ErrorClassification = Literal[
 
 class LlmBrokerError(RuntimeError):
     """Secret-free broker protocol or authority failure."""
+
+
+def _round_claimed_cost_usd_micros(numerator: int) -> int:
+    """Round a token-rate numerator to the nearest micro-dollar."""
+    return (numerator + (_TOKENS_PER_MILLION // 2)) // _TOKENS_PER_MILLION
 
 
 async def _await_terminal_cleanup(cleanup: asyncio.Task[None]) -> None:
@@ -85,7 +93,7 @@ class _StrictModel(BaseModel):
 
 
 class _AcquireRequest(_StrictModel):
-    schema_version: Literal["codegen_llm_broker_request@1"]
+    schema_version: Literal["codegen_llm_broker_request@2"]
     action: Literal["acquire"]
     token: StrictStr = Field(min_length=43, max_length=128, repr=False)
     changeset_id: StrictStr = Field(min_length=1, max_length=128)
@@ -93,21 +101,29 @@ class _AcquireRequest(_StrictModel):
 
 
 class _FinishRequest(_StrictModel):
-    schema_version: Literal["codegen_llm_broker_request@1"]
+    schema_version: Literal["codegen_llm_broker_request@2"]
     action: Literal["finish"]
     token: StrictStr = Field(min_length=43, max_length=128, repr=False)
     changeset_id: StrictStr = Field(min_length=1, max_length=128)
     attempt_id: UUID
     status: TerminalStatus
-    latency_ms: int = Field(ge=0)
-    input_tokens: int | None = Field(default=None, ge=0, le=10_000_000_000)
-    output_tokens: int | None = Field(default=None, ge=0, le=10_000_000_000)
+    claimed_latency_ms: int = Field(ge=0)
+    claimed_input_tokens: int | None = Field(
+        default=None, ge=0, le=10_000_000_000
+    )
+    claimed_output_tokens: int | None = Field(
+        default=None, ge=0, le=10_000_000_000
+    )
     error_classification: ErrorClassification | None
 
     @model_validator(mode="after")
     def require_complete_usage(self) -> _FinishRequest:
-        if (self.input_tokens is None) != (self.output_tokens is None):
-            raise ValueError("input and output token usage must be supplied together")
+        if (self.claimed_input_tokens is None) != (
+            self.claimed_output_tokens is None
+        ):
+            raise ValueError(
+                "claimed input and output token usage must be supplied together"
+            )
         return self
 
 
@@ -180,7 +196,12 @@ class LlmAttemptBroker:
         self._active: dict[UUID, PreparedLlmAttempt] = {}
         self._lock = asyncio.Lock()
         self._closing = False
+        self._shutdown_cancelled = False
         self._handlers: set[asyncio.Task[None]] = set()
+        self._authorized_handlers: set[asyncio.Task[None]] = set()
+        self._handler_writers: dict[
+            asyncio.Task[None], asyncio.StreamWriter
+        ] = {}
         self._root: OpenBrokerRoot | None = None
         self._child_descriptor: int | None = None
         self._child_name: str | None = None
@@ -229,9 +250,11 @@ class LlmAttemptBroker:
             # configured lexical parent/root cannot redirect socket creation.
             child_descriptor_path = root.descriptor_path() / child_name
             server = await asyncio.start_unix_server(
-                self._handle,
+                self._accept,
                 path=str(child_descriptor_path / _BROKER_SOCKET_NAME),
                 limit=MAX_BROKER_MESSAGE_BYTES + 1,
+                backlog=_BROKER_BACKLOG,
+                start_serving=False,
             )
             socket_metadata = os.stat(
                 _BROKER_SOCKET_NAME,
@@ -255,6 +278,7 @@ class LlmAttemptBroker:
                 dir_fd=child_descriptor,
                 follow_symlinks=False,
             )
+            await server.start_serving()
         except BaseException:
             if server is not None:
                 server.close()
@@ -285,23 +309,34 @@ class LlmAttemptBroker:
         *,
         cancelled: bool = False,
     ) -> None:
+        self._shutdown_cancelled = cancelled
         self._closing = True
         server = self._server
         if server is not None:
             server.close()
-            await server.wait_closed()
             self._server = None
-        # ``wait_closed`` stops new accepts but does not await already-created
-        # client callback tasks. Give accepted callbacks one scheduling turn,
-        # then drain the bounded handlers before clearing their attempts.
+        # No new handler can be admitted after ``_closing`` is set. Close every
+        # peer transport, then cancel only handlers that have not presented a
+        # valid authority. Authorized controller work retains its durable
+        # terminalization barrier without remaining dependent on peer I/O.
         await asyncio.sleep(0)
         current = asyncio.current_task()
-        while handlers := tuple(
+        handlers = tuple(
             task
             for task in self._handlers
             if task is not current and not task.done()
-        ):
+        )
+        authorized_handlers = frozenset(self._authorized_handlers)
+        for task in handlers:
+            writer = self._handler_writers.get(task)
+            if writer is not None:
+                writer.close()
+            if task not in authorized_handlers:
+                task.cancel()
+        if handlers:
             await asyncio.gather(*handlers, return_exceptions=True)
+        if server is not None:
+            await server.wait_closed()
         async with self._lock:
             dangling = tuple(self._active.values())
             self._active.clear()
@@ -374,7 +409,11 @@ class LlmAttemptBroker:
                     abandon_llm_attempt(
                         self._pool,
                         attempt_id=attempt.attempt_id,
-                        cancelled=isinstance(exc, asyncio.CancelledError),
+                        cancelled=(
+                            self._shutdown_cancelled
+                            if self._closing
+                            else isinstance(exc, asyncio.CancelledError)
+                        ),
                     )
                 )
                 if registered:
@@ -400,79 +439,113 @@ class LlmAttemptBroker:
             attempt = self._active.get(request.attempt_id)
         if attempt is None:
             raise LlmBrokerError("LLM attempt is not active")
-        cost_usd_micros: int | None = None
-        if request.input_tokens is not None and request.output_tokens is not None:
+        claimed_cost_usd_micros: int | None = None
+        if (
+            request.claimed_input_tokens is not None
+            and request.claimed_output_tokens is not None
+        ):
             numerator = (
-                request.input_tokens
+                request.claimed_input_tokens
                 * attempt.binding.input_cost_per_million_tokens_usd_micros
-                + request.output_tokens
+                + request.claimed_output_tokens
                 * attempt.binding.output_cost_per_million_tokens_usd_micros
             )
-            cost_usd_micros = (numerator + 999_999) // 1_000_000
+            claimed_cost_usd_micros = _round_claimed_cost_usd_micros(numerator)
         await finish_llm_attempt(
             self._pool,
             attempt_id=attempt.attempt_id,
             status=request.status,
-            latency_ms=request.latency_ms,
-            input_tokens=request.input_tokens,
-            output_tokens=request.output_tokens,
-            cost_usd_micros=cost_usd_micros,
+            claimed_latency_ms=request.claimed_latency_ms,
+            claimed_input_tokens=request.claimed_input_tokens,
+            claimed_output_tokens=request.claimed_output_tokens,
+            claimed_cost_usd_micros=claimed_cost_usd_micros,
             error_classification=request.error_classification,
         )
         async with self._lock:
             self._active.pop(request.attempt_id, None)
+
+    def _accept(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        """Admit one bounded handler or close the transport immediately."""
+        if self._closing or len(self._handlers) >= _MAX_BROKER_HANDLERS:
+            writer.close()
+            return
+        task = asyncio.create_task(self._handle(reader, writer))
+        self._handlers.add(task)
+        self._handler_writers[task] = writer
+        task.add_done_callback(self._handler_done)
+
+    def _handler_done(self, task: asyncio.Task[None]) -> None:
+        self._handlers.discard(task)
+        self._authorized_handlers.discard(task)
+        self._handler_writers.pop(task, None)
 
     async def _handle(
         self,
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
     ) -> None:
-        task = asyncio.current_task()
-        if task is not None:
-            self._handlers.add(task)
-        response: _SuccessResponse | _ErrorResponse
         try:
-            if self._closing:
-                raise LlmBrokerError("LLM authority broker is closing")
-            raw = await asyncio.wait_for(reader.readline(), timeout=5.0)
-            if not raw.endswith(b"\n") or len(raw) > MAX_BROKER_MESSAGE_BYTES:
-                raise ValueError("invalid broker message framing")
-            payload = _strict_json(raw[:-1])
-            action = payload.get("action")
-            if action == "acquire":
-                request: _AcquireRequest | _FinishRequest = (
-                    _AcquireRequest.model_validate_json(raw[:-1])
-                )
-            elif action == "finish":
-                request = _FinishRequest.model_validate_json(raw[:-1])
-            else:
-                raise ValueError("invalid broker action")
-            if not self._authorized(request.token, request.changeset_id):
-                response = _ErrorResponse(code="unauthorized")
-            elif isinstance(request, _AcquireRequest):
-                lease = await self._acquire(request)
-                response = _SuccessResponse(lease=lease)
-            else:
-                await self._finish(request)
-                response = _SuccessResponse()
-        except (ValueError, UnicodeDecodeError, ValidationError):
-            response = _ErrorResponse(code="invalid_request")
-        except LlmBrokerError:
-            response = _ErrorResponse(code="attempt_conflict")
-        except Exception:
-            response = _ErrorResponse(code="authority_unavailable")
-        try:
-            writer.write(response.model_dump_json().encode("utf-8") + b"\n")
-            await writer.drain()
+            response: _SuccessResponse | _ErrorResponse
+            try:
+                if self._closing:
+                    raise LlmBrokerError("LLM authority broker is closing")
+                raw = await asyncio.wait_for(reader.readline(), timeout=5.0)
+                if (
+                    not raw.endswith(b"\n")
+                    or len(raw) > MAX_BROKER_MESSAGE_BYTES
+                ):
+                    raise ValueError("invalid broker message framing")
+                payload = _strict_json(raw[:-1])
+                action = payload.get("action")
+                if action == "acquire":
+                    request: _AcquireRequest | _FinishRequest = (
+                        _AcquireRequest.model_validate_json(raw[:-1])
+                    )
+                elif action == "finish":
+                    request = _FinishRequest.model_validate_json(raw[:-1])
+                else:
+                    raise ValueError("invalid broker action")
+                if not self._authorized(request.token, request.changeset_id):
+                    response = _ErrorResponse(code="unauthorized")
+                else:
+                    task = asyncio.current_task()
+                    if task is not None:
+                        self._authorized_handlers.add(task)
+                    try:
+                        if isinstance(request, _AcquireRequest):
+                            lease = await self._acquire(request)
+                            response = _SuccessResponse(lease=lease)
+                        else:
+                            await self._finish(request)
+                            response = _SuccessResponse()
+                    finally:
+                        if task is not None:
+                            self._authorized_handlers.discard(task)
+            except (ValueError, UnicodeDecodeError, ValidationError):
+                response = _ErrorResponse(code="invalid_request")
+            except LlmBrokerError:
+                response = _ErrorResponse(code="attempt_conflict")
+            except Exception:
+                response = _ErrorResponse(code="authority_unavailable")
+            try:
+                writer.write(response.model_dump_json().encode("utf-8") + b"\n")
+                await writer.drain()
+            except (ConnectionError, OSError):
+                pass
         finally:
             writer.close()
-            await writer.wait_closed()
-            if task is not None:
-                self._handlers.discard(task)
+            try:
+                await writer.wait_closed()
+            except (ConnectionError, OSError):
+                pass
 
 
 class LlmBrokerClient:
-    """Worker-side client that never caches credential-bearing leases."""
+    """Cooperative client that does not cache leases between phase attempts."""
 
     def __init__(self, authority: LlmExecutionAuthority, changeset_id: str) -> None:
         self._authority = authority
@@ -525,7 +598,7 @@ class LlmBrokerClient:
     async def acquire(self, phase: Phase) -> tuple[LlmAttemptLease, float]:
         response = await self._exchange(
             {
-                "schema_version": "codegen_llm_broker_request@1",
+                "schema_version": "codegen_llm_broker_request@2",
                 "action": "acquire",
                 "token": self._authority.token,
                 "changeset_id": self._changeset_id,
@@ -543,21 +616,23 @@ class LlmBrokerClient:
         *,
         status: TerminalStatus,
         error_classification: ErrorClassification | None,
-        input_tokens: int | None = None,
-        output_tokens: int | None = None,
+        claimed_input_tokens: int | None = None,
+        claimed_output_tokens: int | None = None,
     ) -> None:
-        latency_ms = max(0, round((time.monotonic() - started_at) * 1000))
+        claimed_latency_ms = max(
+            0, round((time.monotonic() - started_at) * 1000)
+        )
         response = await self._exchange(
             {
-                "schema_version": "codegen_llm_broker_request@1",
+                "schema_version": "codegen_llm_broker_request@2",
                 "action": "finish",
                 "token": self._authority.token,
                 "changeset_id": self._changeset_id,
                 "attempt_id": str(lease.attempt_id),
                 "status": status,
-                "latency_ms": latency_ms,
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
+                "claimed_latency_ms": claimed_latency_ms,
+                "claimed_input_tokens": claimed_input_tokens,
+                "claimed_output_tokens": claimed_output_tokens,
                 "error_classification": error_classification,
             }
         )

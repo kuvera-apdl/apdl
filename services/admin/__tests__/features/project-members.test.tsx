@@ -76,8 +76,12 @@ function baseHandlers(identity: object = OWNER_IDENTITY, authorization: object =
     http.get('*/api/auth/me', () => HttpResponse.json(identity)),
     http.get('*/api/projects/demo/authorization', () => HttpResponse.json(authorization)),
     http.get('*/api/projects/demo/members', () => HttpResponse.json(MEMBERS)),
-    http.get('*/api/projects/demo/members/audit', () => HttpResponse.json([])),
-    http.get('*/api/projects/demo/ownership/audit', () => HttpResponse.json([])),
+    http.get('*/api/projects/demo/members/audit', () =>
+      HttpResponse.json({ entries: [], next_cursor: null }),
+    ),
+    http.get('*/api/projects/demo/ownership/audit', () =>
+      HttpResponse.json({ entries: [], next_cursor: null }),
+    ),
   ]
 }
 
@@ -124,6 +128,8 @@ test('keeps a reveal-once invitation URL only while its dialog is open', async (
           email: 'invitee@example.com',
           roles: ['config:read'],
           inviter_email: 'owner@example.com',
+          status: 'valid',
+          blocked_reason: null,
           expires_at: '2026-08-06T12:00:00Z',
           created_at: '2026-07-30T12:00:00Z',
           invitation_url: `http://localhost/invitations/${'b'.repeat(43)}`,
@@ -174,12 +180,118 @@ test('transfers ownership only to an eligible active manager after confirmation'
 
   await userEvent.click(await screen.findByRole('button', { name: 'Transfer ownership' }))
   await userEvent.selectOptions(screen.getByLabelText('Eligible active manager'), MANAGER_ID)
+  await userEvent.type(screen.getByLabelText('Reason (optional)'), 'Planned team handoff')
   await userEvent.click(screen.getByRole('button', { name: 'Confirm transfer' }))
 
-  await waitFor(() => expect(transferBody).toEqual({ target_user_id: MANAGER_ID }))
+  await waitFor(() =>
+    expect(transferBody).toEqual({
+      target_user_id: MANAGER_ID,
+      reason: 'Planned team handoff',
+    }),
+  )
   await waitFor(() =>
     expect(screen.queryByRole('button', { name: 'Confirm transfer' })).not.toBeInTheDocument(),
   )
+})
+
+test('loads older audit activity with the returned keyset cursor', async () => {
+  const auditRequests: URL[] = []
+  const newestAuditId = '50000000-0000-4000-8000-000000000005'
+  server.use(
+    http.get('*/api/projects/demo/members/audit', ({ request }) => {
+      const url = new URL(request.url)
+      auditRequests.push(url)
+      if (!url.searchParams.has('before_created_at')) {
+        return HttpResponse.json({
+          entries: [
+            {
+              audit_id: newestAuditId,
+              project_id: 'demo',
+              action: 'invitation_create',
+              actor_user_id: OWNER_ID,
+              actor_email: 'owner@example.com',
+              subject_user_id: null,
+              subject_email: 'first-page@example.com',
+              invitation_id: INVITATION_ID,
+              previous_roles: null,
+              new_roles: ['config:read'],
+              created_at: '2026-08-01T12:00:00Z',
+            },
+          ],
+          next_cursor: {
+            created_at: '2026-08-01T12:00:00Z',
+            audit_id: newestAuditId,
+          },
+        })
+      }
+      return HttpResponse.json({
+        entries: [
+          {
+            audit_id: '60000000-0000-4000-8000-000000000006',
+            project_id: 'demo',
+            action: 'member_remove',
+            actor_user_id: OWNER_ID,
+            actor_email: 'owner@example.com',
+            subject_user_id: MANAGER_ID,
+            subject_email: 'older-page@example.com',
+            invitation_id: null,
+            previous_roles: ['config:read'],
+            new_roles: null,
+            created_at: '2026-07-30T12:00:00Z',
+          },
+        ],
+        next_cursor: null,
+      })
+    }),
+    ...baseHandlers(),
+  )
+  renderMembers()
+
+  expect(await screen.findByText(/first-page@example.com/)).toBeInTheDocument()
+  await userEvent.click(screen.getByRole('button', { name: 'Load older activity' }))
+  expect(await screen.findByText(/older-page@example.com/)).toBeInTheDocument()
+
+  expect(auditRequests).toHaveLength(2)
+  expect(auditRequests[0].searchParams.get('limit')).toBe('50')
+  expect(auditRequests[1].searchParams.get('before_created_at')).toBe(
+    '2026-08-01T12:00:00Z',
+  )
+  expect(auditRequests[1].searchParams.get('before_audit_id')).toBe(newestAuditId)
+})
+
+test('explains blocked invitations and keeps revocation available', async () => {
+  document.cookie = 'apdl_admin_csrf=members-csrf; Path=/'
+  server.use(
+    http.get('*/api/projects/demo/members', () =>
+      HttpResponse.json({
+        ...MEMBERS,
+        pending_invitations: [
+          {
+            invitation_id: INVITATION_ID,
+            email: 'blocked@example.com',
+            roles: ['config:read'],
+            inviter_email: 'manager@example.com',
+            status: 'blocked',
+            blocked_reason: 'inviter_lacks_members_manage',
+            expires_at: '2026-08-06T12:00:00Z',
+            created_at: '2026-07-30T12:00:00Z',
+          },
+        ],
+      }),
+    ),
+    ...baseHandlers(),
+    http.delete('*/api/projects/demo/invitations/:invitationId', () =>
+      new HttpResponse(null, { status: 204 }),
+    ),
+  )
+  renderMembers()
+
+  expect(await screen.findByText('blocked@example.com')).toBeInTheDocument()
+  expect(screen.getByText('blocked')).toBeInTheDocument()
+  expect(
+    screen.getByText(/inviter no longer has member-management authority/i),
+  ).toHaveTextContent('Revoke and reissue this invitation from an authorized account.')
+  expect(screen.getByRole('button', { name: 'Revoke' })).toBeEnabled()
 })
 
 test('read-only and operator-managed projects expose no inert management controls', async () => {

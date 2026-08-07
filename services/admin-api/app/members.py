@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 import re
+from typing import Annotated
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 
 from app.auth import (
     ACCOUNT_REGISTRATION_LOCK_ID,
@@ -17,16 +18,20 @@ from app.auth import (
     require_session,
 )
 from app.login_security import (
+    LoginSource,
     build_login_source,
-    preflight_auth_rate_limit,
+    preflight_invitation_rate_limit,
     set_device_cookie,
 )
 from app.models import (
+    AuditCursor,
+    AuditPageQuery,
     InvitationCreateRequest,
     InvitationInspection,
     InvitationRegistrationRequest,
     MemberRolesReplaceRequest,
     MembershipAuditEntry,
+    MembershipAuditPage,
     PendingProjectInvitation,
     ProjectAccess,
     ProjectInvitationReveal,
@@ -59,17 +64,23 @@ async def _rate_limit_invitation(
     *,
     request: Request,
     digest: str,
-) -> None:
+) -> LoginSource:
     settings = request.app.state.settings
     now = datetime.now(timezone.utc)
     source = build_login_source(request, f"invitation:{digest}", settings)
-    retry_after = await preflight_auth_rate_limit(conn, source, settings, now)
+    retry_after = await preflight_invitation_rate_limit(
+        conn,
+        source,
+        settings,
+        now,
+    )
     if retry_after > 0:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many invitation attempts. Try again later.",
             headers={"Retry-After": str(retry_after)},
         )
+    return source
 
 
 async def _manager_context(
@@ -187,11 +198,14 @@ def _member(row) -> ProjectMember:
 
 
 def _invitation(row) -> PendingProjectInvitation:
+    blocked_reason = row["blocked_reason"]
     return PendingProjectInvitation(
         invitation_id=row["invitation_id"],
         email=str(row["email"]),
         roles=[str(role) for role in row["roles"]],
         inviter_email=str(row["inviter_email"]),
+        status="valid" if blocked_reason is None else "blocked",
+        blocked_reason=blocked_reason,
         expires_at=row["expires_at"],
         created_at=row["created_at"],
     )
@@ -275,17 +289,37 @@ async def list_project_members(
             project_id,
         )
         invitation_rows = await conn.fetch(
-            """
+            f"""
             SELECT
                 invitation.invitation_id,
                 invitation.email,
                 invitation.roles,
                 inviter.email AS inviter_email,
+                CASE
+                    WHEN NOT inviter.active THEN 'inviter_inactive'
+                    WHEN inviter_membership.user_id IS NULL
+                        THEN 'inviter_not_project_member'
+                    WHEN NOT (
+                        '{MEMBERS_MANAGE_ROLE}' = ANY(inviter_membership.roles)
+                    ) THEN 'inviter_lacks_members_manage'
+                    WHEN NOT (invitation.roles <@ inviter_membership.roles)
+                        THEN 'roles_exceed_inviter_authority'
+                    WHEN '{MEMBERS_MANAGE_ROLE}' = ANY(invitation.roles)
+                     AND project.owner_user_id IS DISTINCT FROM
+                         invitation.inviter_user_id
+                        THEN 'members_manage_requires_owner'
+                    ELSE NULL
+                END AS blocked_reason,
                 invitation.expires_at,
                 invitation.created_at
             FROM admin_project_invitations AS invitation
+            JOIN admin_projects AS project
+              ON project.project_id = invitation.project_id
             JOIN admin_users AS inviter
               ON inviter.user_id = invitation.inviter_user_id
+            LEFT JOIN admin_user_projects AS inviter_membership
+              ON inviter_membership.user_id = invitation.inviter_user_id
+             AND inviter_membership.project_id = invitation.project_id
             WHERE invitation.project_id = $1
               AND invitation.accepted_at IS NULL
               AND invitation.revoked_at IS NULL
@@ -427,6 +461,7 @@ async def create_project_invitation(
             {
                 **dict(row),
                 "inviter_email": session.email,
+                "blocked_reason": None,
             }
         ).model_dump(),
         invitation_url=f"{origin}/invitations/{raw_token}",
@@ -670,13 +705,14 @@ async def remove_project_member(
 
 @router.get(
     "/api/projects/{project_id}/members/audit",
-    response_model=list[MembershipAuditEntry],
+    response_model=MembershipAuditPage,
 )
 async def list_membership_audit(
     project_id: str,
     request: Request,
+    page: Annotated[AuditPageQuery, Query()],
     session: AdminSession = Depends(require_session),
-) -> list[MembershipAuditEntry]:
+) -> MembershipAuditPage:
     async with request.app.state.pg_pool.acquire() as conn:
         await _manager_context(
             conn,
@@ -702,12 +738,30 @@ async def list_membership_audit(
             JOIN admin_users AS actor
               ON actor.user_id = audit.actor_user_id
             WHERE audit.project_id = $1
+              AND (
+                  $2::TIMESTAMPTZ IS NULL
+                  OR (audit.created_at, audit.audit_id)
+                     < ($2::TIMESTAMPTZ, $3::UUID)
+              )
             ORDER BY audit.created_at DESC, audit.audit_id DESC
-            LIMIT 200
+            LIMIT $4
             """,
             project_id,
+            page.before_created_at,
+            page.before_audit_id,
+            page.limit + 1,
         )
-    return [MembershipAuditEntry(**dict(row)) for row in rows]
+    page_rows = rows[: page.limit]
+    entries = [MembershipAuditEntry(**dict(row)) for row in page_rows]
+    next_cursor = (
+        AuditCursor(
+            created_at=page_rows[-1]["created_at"],
+            audit_id=page_rows[-1]["audit_id"],
+        )
+        if len(rows) > page.limit
+        else None
+    )
+    return MembershipAuditPage(entries=entries, next_cursor=next_cursor)
 
 
 @router.get(
@@ -840,11 +894,14 @@ async def register_with_invitation(
     if TOKEN_PATTERN.fullmatch(raw_token) is None:
         raise _unavailable_invitation()
     digest = token_hash(raw_token)
-    source = build_login_source(request, f"invitation:{digest}", settings)
 
     async with request.app.state.pg_pool.acquire() as conn:
         async with conn.transaction():
-            await _rate_limit_invitation(conn, request=request, digest=digest)
+            source = await _rate_limit_invitation(
+                conn,
+                request=request,
+                digest=digest,
+            )
             inspection = await _valid_invitation(conn, digest=digest, lock=False)
     if inspection is None:
         raise _unavailable_invitation()

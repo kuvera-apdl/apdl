@@ -115,14 +115,24 @@ credential version, decrypts it just in time, and revalidates it at the egress
 boundary. It records provider/model, credential ID/version, prompt hash, usage,
 cost, latency, and outcome without storing prompt content or secret material.
 
-Migration 051 moves every fresh or migrated project to one explicit
-`inactive` setup with no fabricated model assignment. A current human owner, or
-an active delegated member holding both `agents:manage` and
-`credentials:manage`, connects one or more reviewed providers and activates the
-project through `/v1/agents/setup`. The server derives fixed endpoints,
-residency, classifications, reviewed prices, and positive project/run ceilings
-from the catalog. Each tier has one exact primary assignment; provider failures
-do not trigger an implicit same-vendor or cross-vendor fallback.
+Migration 051 is an explicit setup cutover. It moves every project to
+`inactive`, removes the old tier assignments and runtime provider-policy
+copies, and discards model inventories created before catalog pricing was
+reviewed. It preserves positive project and per-run limits, replacing only
+non-positive bootstrap values. After upgrading, a current human owner, or an
+active delegated member holding both `agents:manage` and
+`credentials:manage`, must refresh each provider against the current catalog,
+select both tiers again, and reactivate through `/v1/agents/setup`.
+
+APDL release maintainers own the reviewed price metadata in
+`app/llm/provider_catalog.py` and must update both the values and catalog
+version when provider pricing changes. APDL does not fetch live prices from a
+provider billing API. Operators should keep Agents inactive when the deployed
+catalog is not current and refresh project inventories after deploying a new
+catalog. The server derives fixed endpoints, residency, classifications, and
+reviewed prices from that catalog while preserving the project's stored cost
+limits. Each tier has one exact primary assignment; provider failures do not
+trigger an implicit same-vendor or cross-vendor fallback.
 
 ### Connect xAI/Grok
 

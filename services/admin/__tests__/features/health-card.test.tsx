@@ -52,7 +52,9 @@ describe('ServiceHealthCard Config readiness', () => {
         probe({
           body: {
             status: 'ready',
-            checks: { postgres: 'ready', redis: 'ready' },
+            service: 'apdl-config',
+            checks: { postgres: 'ready', redis: 'ready', outbox: 'ready' },
+            outbox: { status: 'ready', degraded_reasons: [] },
             sse: { active_connections: count },
           },
         }),
@@ -72,7 +74,9 @@ describe('ServiceHealthCard Config readiness', () => {
           status: 503,
           body: {
             status: 'not_ready',
-            checks: { postgres: 'not_ready', redis: 'ready' },
+            service: 'apdl-config',
+            checks: { postgres: 'ready', redis: 'ready', outbox: 'not_ready' },
+            outbox: { status: 'ready', degraded_reasons: [] },
             sse: { active_connections: 2 },
           },
         }),
@@ -80,7 +84,36 @@ describe('ServiceHealthCard Config readiness', () => {
     )
 
     expect(screen.getByText('degraded')).toBeVisible()
-    expect(screen.getByText('pg: not_ready · redis: ready · sse: 2')).toBeVisible()
+    expect(
+      screen.getByText('pg: ready · redis: ready · sse: 2 · outbox: not_ready'),
+    ).toBeVisible()
+  })
+
+  test('appends future non-ready checks without expanding the happy-path summary', () => {
+    renderCard(
+      configResult(
+        probe({
+          ok: false,
+          status: 503,
+          body: {
+            status: 'not_ready',
+            service: 'apdl-config',
+            checks: {
+              postgres: 'ready',
+              redis: 'ready',
+              outbox: 'ready',
+              search_index: 'warming',
+            },
+            outbox: { status: 'ready', degraded_reasons: [] },
+            sse: { active_connections: 3 },
+          },
+        }),
+      ),
+    )
+
+    expect(
+      screen.getByText('pg: ready · redis: ready · sse: 3 · search_index: warming'),
+    ).toBeVisible()
   })
 
   test('handles missing, failed, and malformed readiness without undefined values', () => {

@@ -1098,10 +1098,10 @@ async def finish_llm_attempt(
     *,
     attempt_id: UUID,
     status: Literal["succeeded", "failed", "cancelled"],
-    latency_ms: int,
-    input_tokens: int | None = None,
-    output_tokens: int | None = None,
-    cost_usd_micros: int | None = None,
+    claimed_latency_ms: int,
+    claimed_input_tokens: int | None = None,
+    claimed_output_tokens: int | None = None,
+    claimed_cost_usd_micros: int | None = None,
     error_classification: str | None = None,
 ) -> None:
     if status == "succeeded" and error_classification is not None:
@@ -1112,18 +1112,18 @@ async def finish_llm_attempt(
         updated = await conn.fetchval(
             """
             UPDATE codegen_llm_attempts
-            SET status = $2, finished_at = NOW(), latency_ms = $3,
-                input_tokens = $4, output_tokens = $5,
-                cost_usd_micros = $6, error_classification = $7
+            SET status = $2, finished_at = NOW(), claimed_latency_ms = $3,
+                claimed_input_tokens = $4, claimed_output_tokens = $5,
+                claimed_cost_usd_micros = $6, error_classification = $7
             WHERE attempt_id = $1 AND status = 'in_flight'
             RETURNING attempt_id
             """,
             attempt_id,
             status,
-            latency_ms,
-            input_tokens,
-            output_tokens,
-            cost_usd_micros,
+            claimed_latency_ms,
+            claimed_input_tokens,
+            claimed_output_tokens,
+            claimed_cost_usd_micros,
             error_classification,
         )
     if updated is None:
@@ -1147,10 +1147,6 @@ async def abandon_llm_attempt(
                     ELSE 'failed'
                 END,
                 finished_at = NOW(),
-                latency_ms = CASE
-                    WHEN status = 'in_flight' THEN COALESCE(latency_ms, 0)
-                    ELSE latency_ms
-                END,
                 error_classification = CASE
                     WHEN $2::BOOLEAN THEN 'cancelled'
                     ELSE 'unknown'

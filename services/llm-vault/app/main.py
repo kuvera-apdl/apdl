@@ -231,14 +231,19 @@ async def create_connection(
     request: Request,
 ) -> ConnectionDetail:
     principal = require_admin(request, body.project_id)
+    store = _store(request)
     try:
+        await store.assert_create_authority(
+            project_id=body.project_id,
+            actor_user_id=principal.actor_user_id,
+        )
         model_ids = await discover_model_ids(
             body.provider, body.api_key.get_secret_value()
         )
         projections = await _project_models(
             _projector(request), tuple(body.consumers), body.provider, model_ids
         )
-        return await _store(request).create(
+        return await store.create(
             project_id=body.project_id,
             provider=body.provider,
             label=body.label,

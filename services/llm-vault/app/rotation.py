@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 from uuid import UUID, uuid4
 
-from app.crypto import CredentialCipher
+from app.crypto import CredentialCipher, EncryptedSecret
 
 
 MAINTENANCE_INHIBITOR_LOCK_ID = 4_158_044_083
@@ -14,6 +15,17 @@ MAINTENANCE_GUARD_LOCK_ID = 4_158_044_084
 
 class VaultRotationError(RuntimeError):
     """The vault key cannot be rotated under the current authority."""
+
+
+@dataclass(frozen=True)
+class _PlannedRotation:
+    credential_id: UUID
+    connection_id: UUID
+    project_id: str
+    provider: str
+    credential_version: int
+    previous_key_id: str
+    encrypted: EncryptedSecret
 
 
 def _operator(value: str) -> str:
@@ -25,6 +37,48 @@ def _operator(value: str) -> str:
     ):
         raise ValueError("operator must be a normalized single-line value")
     return value
+
+
+def _prepare_rotation(
+    row: Any,
+    *,
+    old_cipher: CredentialCipher,
+    new_cipher: CredentialCipher,
+) -> _PlannedRotation:
+    """Return an encrypted-only plan for one authenticated credential."""
+    credential_id = UUID(str(row["credential_id"]))
+    connection_id = UUID(str(row["connection_id"]))
+    project_id = str(row["project_id"])
+    provider = str(row["provider"])
+    credential_version = int(row["credential_version"])
+    previous_key_id = str(row["encryption_key_id"])
+    plaintext = old_cipher.decrypt(
+        ciphertext=bytes(row["ciphertext"]),
+        nonce=bytes(row["nonce"]),
+        encryption_key_id=previous_key_id,
+        credential_id=credential_id,
+        connection_id=connection_id,
+        project_id=project_id,
+        provider=provider,
+        credential_version=credential_version,
+    )
+    encrypted = new_cipher.encrypt(
+        plaintext,
+        credential_id=credential_id,
+        connection_id=connection_id,
+        project_id=project_id,
+        provider=provider,
+        credential_version=credential_version,
+    )
+    return _PlannedRotation(
+        credential_id=credential_id,
+        connection_id=connection_id,
+        project_id=project_id,
+        provider=provider,
+        credential_version=credential_version,
+        previous_key_id=previous_key_id,
+        encrypted=encrypted,
+    )
 
 
 async def rotate_active_credentials(
@@ -79,61 +133,31 @@ async def rotate_active_credentials(
         """
     )
 
-    # Authenticate the complete active set before the first write. This keeps
-    # a wrong or partially stale old key all-or-nothing without retaining a
-    # project-wide collection of plaintext secrets in memory.
-    for row in rows:
-        plaintext = old_cipher.decrypt(
-            ciphertext=bytes(row["ciphertext"]),
-            nonce=bytes(row["nonce"]),
-            encryption_key_id=str(row["encryption_key_id"]),
-            credential_id=UUID(str(row["credential_id"])),
-            connection_id=UUID(str(row["connection_id"])),
-            project_id=str(row["project_id"]),
-            provider=str(row["provider"]),
-            credential_version=int(row["credential_version"]),
+    # Authenticate and re-encrypt the complete active set before the first
+    # write. CPython cannot zeroize immutable plaintext strings; each helper
+    # invocation scopes one credential at a time, and plans retain ciphertext
+    # only. A wrong or partially stale old key therefore remains all-or-nothing.
+    plans = tuple(
+        _prepare_rotation(
+            row,
+            old_cipher=old_cipher,
+            new_cipher=new_cipher,
         )
-        del plaintext
+        for row in rows
+    )
 
     audit_ids: list[UUID] = []
-    for row in rows:
-        credential_id = UUID(str(row["credential_id"]))
-        connection_id = UUID(str(row["connection_id"]))
-        project_id = str(row["project_id"])
-        provider = str(row["provider"])
-        credential_version = int(row["credential_version"])
-        previous_key_id = str(row["encryption_key_id"])
-        plaintext = old_cipher.decrypt(
-            ciphertext=bytes(row["ciphertext"]),
-            nonce=bytes(row["nonce"]),
-            encryption_key_id=previous_key_id,
-            credential_id=credential_id,
-            connection_id=connection_id,
-            project_id=project_id,
-            provider=provider,
-            credential_version=credential_version,
-        )
-        try:
-            encrypted = new_cipher.encrypt(
-                plaintext,
-                credential_id=credential_id,
-                connection_id=connection_id,
-                project_id=project_id,
-                provider=provider,
-                credential_version=credential_version,
-            )
-        finally:
-            del plaintext
+    for plan in plans:
         result = await conn.execute(
             """
             UPDATE llm_vault_provider_secrets
             SET ciphertext = $2, nonce = $3, encryption_key_id = $4
             WHERE credential_id = $1
             """,
-            credential_id,
-            encrypted.ciphertext,
-            encrypted.nonce,
-            encrypted.encryption_key_id,
+            plan.credential_id,
+            plan.encrypted.ciphertext,
+            plan.encrypted.nonce,
+            plan.encrypted.encryption_key_id,
         )
         if result != "UPDATE 1":
             raise VaultRotationError(
@@ -152,40 +176,38 @@ async def rotate_active_credentials(
             )
             """,
             audit_id,
-            connection_id,
-            project_id,
-            provider,
-            credential_id,
-            credential_version,
+            plan.connection_id,
+            plan.project_id,
+            plan.provider,
+            plan.credential_id,
+            plan.credential_version,
             canonical_operator,
-            previous_key_id,
-            encrypted.encryption_key_id,
+            plan.previous_key_id,
+            plan.encrypted.encryption_key_id,
         )
         audit_ids.append(audit_id)
 
-    for row in rows:
-        credential_id = UUID(str(row["credential_id"]))
+    for plan in plans:
         stored = await conn.fetchrow(
             """
             SELECT ciphertext, nonce, encryption_key_id
             FROM llm_vault_provider_secrets
             WHERE credential_id = $1
             """,
-            credential_id,
+            plan.credential_id,
         )
         if stored is None:
             raise VaultRotationError(
                 "An active vault secret disappeared during key rotation"
             )
-        plaintext = new_cipher.decrypt(
+        new_cipher.decrypt(
             ciphertext=bytes(stored["ciphertext"]),
             nonce=bytes(stored["nonce"]),
             encryption_key_id=str(stored["encryption_key_id"]),
-            credential_id=credential_id,
-            connection_id=UUID(str(row["connection_id"])),
-            project_id=str(row["project_id"]),
-            provider=str(row["provider"]),
-            credential_version=int(row["credential_version"]),
+            credential_id=plan.credential_id,
+            connection_id=plan.connection_id,
+            project_id=plan.project_id,
+            provider=plan.provider,
+            credential_version=plan.credential_version,
         )
-        del plaintext
-    return len(rows), tuple(audit_ids)
+    return len(plans), tuple(audit_ids)

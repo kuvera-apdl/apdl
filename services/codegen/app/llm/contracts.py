@@ -89,7 +89,7 @@ class LlmExecutionSnapshot(BaseModel):
 
 
 class LlmRuntimeBinding(BaseModel):
-    """Ephemeral exact provider authority for one runtime phase."""
+    """Ephemeral provider authority serialized to the worker in plaintext."""
 
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
@@ -108,6 +108,10 @@ class LlmRuntimeBinding(BaseModel):
         min_length=1,
         max_length=16_384,
         repr=False,
+        description=(
+            "Plaintext attempt-scoped provider credential. repr=False is log "
+            "hygiene only; normal model serialization includes this field."
+        ),
     )
 
 
@@ -151,7 +155,7 @@ class LlmExecutionAuthority(BaseModel):
 
 
 class PreparedLlmAttempt(BaseModel):
-    """Durable pre-egress attempt plus its ephemeral decrypted authority."""
+    """Durable pre-egress attempt plus worker-bound plaintext authority."""
 
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
@@ -164,7 +168,7 @@ class PreparedLlmAttempt(BaseModel):
 
 
 class LlmAttemptLease(BaseModel):
-    """One worker-held, already-egressed phase credential."""
+    """One worker-held phase lease containing a plaintext provider credential."""
 
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,7 @@ MIGRATION = (
     / "migrations"
     / "051_agents_project_setup.sql"
 )
+MIGRATION_058 = MIGRATION.with_name("058_agent_service_capabilities.sql")
 
 
 class _Transaction:
@@ -65,6 +67,8 @@ class _SetupConn:
         roles: list[str] | None = None,
         policy_state: str = "inactive",
         policy_version: int = 0,
+        project_budget: int = 20_000_000,
+        run_budget: int = 2_000_000,
     ) -> None:
         self.owner_user_id = owner_user_id
         self.account_active = account_active
@@ -92,8 +96,8 @@ class _SetupConn:
             "version": policy_version,
             "required_data_residency": "global",
             "allow_cross_vendor_retry": False,
-            "project_daily_cost_limit_usd_micros": 20_000_000,
-            "run_cost_limit_usd_micros": 2_000_000,
+            "project_daily_cost_limit_usd_micros": project_budget,
+            "run_cost_limit_usd_micros": run_budget,
             "activated_by_actor_user_id": (
                 ACTOR_ID if policy_version > 0 else None
             ),
@@ -240,6 +244,96 @@ async def test_first_owner_activation_adds_analysis_roles_only(
         for query, args in conn.executed
         if "pg_advisory_xact_lock" in query
     )
+
+
+@pytest.mark.asyncio
+async def test_later_reconfiguration_does_not_restore_removed_analysis_roles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = _SetupConn(policy_state="active", policy_version=4)
+    store = AgentsSetupStore(_Pool(conn))
+
+    async def fake_get(project_id: str, *, actor_user_id: UUID | None) -> object:
+        return object()
+
+    monkeypatch.setattr(store, "get", fake_get)
+    await store.put(
+        "demo",
+        fast_model=_selection(),
+        reasoning_model=_selection(),
+        expected_version=4,
+        actor_user_id=ACTOR_ID,
+    )
+
+    assert not any(
+        "apdl_agents_grant_owner_execution_roles" in query
+        for operation, query, _args in conn.operations
+        if operation == "fetchval"
+    )
+
+
+def test_first_activation_role_grant_has_a_distinct_audit_action() -> None:
+    sql = MIGRATION_058.read_text(encoding="utf-8")
+    function = sql[
+        sql.index("CREATE FUNCTION public.apdl_agents_grant_owner_execution_roles") :
+        sql.index("CREATE FUNCTION public.apdl_consume_agent_service_capability")
+    ]
+
+    assert "'activation_grant'" in function
+    assert "'roles_replace'" not in function
+
+
+@pytest.mark.parametrize(
+    ("policy_state", "policy_version"),
+    [("inactive", 0), ("active", 4)],
+)
+@pytest.mark.asyncio
+async def test_setup_preserves_existing_budget_limits(
+    monkeypatch: pytest.MonkeyPatch,
+    policy_state: str,
+    policy_version: int,
+) -> None:
+    conn = _SetupConn(
+        policy_state=policy_state,
+        policy_version=policy_version,
+        project_budget=73_000_000,
+        run_budget=7_000_000,
+    )
+    store = AgentsSetupStore(_Pool(conn))
+
+    async def fake_get(project_id: str, *, actor_user_id: UUID | None) -> object:
+        return object()
+
+    monkeypatch.setattr(store, "get", fake_get)
+    await store.put(
+        "demo",
+        fast_model=_selection(),
+        reasoning_model=_selection(),
+        expected_version=policy_version,
+        actor_user_id=ACTOR_ID,
+    )
+
+    policy_update, update_args = next(
+        (query, args)
+        for query, args in conn.executed
+        if "UPDATE llm_project_policies" in query
+    )
+    assert "project_daily_cost_limit_usd_micros" not in policy_update
+    assert "run_cost_limit_usd_micros" not in policy_update
+    assert update_args == (
+        "demo",
+        policy_version + 1,
+        "global",
+        ACTOR_ID,
+    )
+    audit_args = next(
+        args
+        for query, args in conn.executed
+        if "INSERT INTO llm_project_setup_audit" in query
+    )
+    for snapshot in (json.loads(audit_args[4]), json.loads(audit_args[5])):
+        assert snapshot["project_daily_cost_limit_usd_micros"] == 73_000_000
+        assert snapshot["run_cost_limit_usd_micros"] == 7_000_000
 
 
 @pytest.mark.asyncio
@@ -505,7 +599,12 @@ def test_migration_splits_analysis_activation_from_operator_effect_authority() -
     assert "ADD COLUMN state TEXT NOT NULL DEFAULT 'inactive'" in sql
     assert "SET DEFAULT 20000000" in sql
     assert "SET DEFAULT 2000000" in sql
+    assert "WHERE project_daily_cost_limit_usd_micros <= 0" in sql
+    assert "OR run_cost_limit_usd_micros <= 0" in sql
     assert "DELETE FROM llm_project_model_assignments;" in sql
+    assert "DELETE FROM llm_project_provider_policies;" in sql
+    assert "DELETE FROM llm_project_provider_models;" in sql
+    assert "UPDATE llm_project_provider_models" not in sql
     assert "VALUES (NEW.project_id)" in sql
     assert "'local'" not in sql
     assert "'agents:approve' = ANY(NEW.roles)" in sql
@@ -524,3 +623,30 @@ def test_migration_splits_analysis_activation_from_operator_effect_authority() -
     ]
     assert "llm_project_setup_audit_no_update_delete" in sql
     assert "llm_project_setup_audit_no_truncate" in sql
+
+
+def test_migration_requires_complete_immutable_attempt_setup_bindings() -> None:
+    sql = MIGRATION.read_text(encoding="utf-8")
+    constraint = sql[
+        sql.index("ADD CONSTRAINT llm_provider_attempts_setup_binding_check") :
+        sql.index(
+            "CREATE OR REPLACE FUNCTION apdl_protect_llm_attempt_setup_binding"
+        )
+    ]
+    trigger_function = sql[
+        sql.index(
+            "CREATE OR REPLACE FUNCTION apdl_protect_llm_attempt_setup_binding"
+        ) :
+        sql.index("CREATE TRIGGER llm_provider_attempts_protect_setup_binding")
+    ]
+
+    for column in (
+        "setup_version",
+        "model_tier",
+        "connection_version",
+        "inventory_version",
+        "model_catalog_version",
+    ):
+        assert f"{column} IS NOT NULL" in constraint
+    assert "NEW.legacy_unbound_setup IS DISTINCT FROM" in trigger_function
+    assert "OLD.legacy_unbound_setup" in trigger_function

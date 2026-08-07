@@ -847,14 +847,20 @@ class AiderEditor:
                                     if content is not None
                                     else "failed"
                                 ),
-                                input_tokens=usage[0] if usage else None,
-                                output_tokens=usage[1] if usage else None,
+                                claimed_input_tokens=(
+                                    usage[0] if usage else None
+                                ),
+                                claimed_output_tokens=(
+                                    usage[1] if usage else None
+                                ),
                                 error_classification=(
                                     None if content is not None else "unknown"
                                 ),
                             )
                             return content
                         finally:
+                            # Shorten cooperative reference lifetimes only;
+                            # immutable Python strings are not zeroized.
                             binding = None
                             lease = None
 
@@ -1226,6 +1232,8 @@ class AiderEditor:
                                 ),
                             )
                         finally:
+                            # This drops local references after the child exits;
+                            # it cannot zeroize Python strings or OS-level copies.
                             provider_environment.clear()
                             binding = None
                             lease = None

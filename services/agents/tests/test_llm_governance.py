@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
 
 from app.llm import router
+from app.llm.client_cache import (
+    OwnedProviderClient,
+    ProviderClientCache,
+    ProviderClientRetiredError,
+)
 from app.llm.contracts import (
     LlmBudgetExceededError,
     LlmCredentialUnavailableError,
@@ -27,11 +33,30 @@ from app.store.llm_governance import (
     prepare_provider_attempt,
     reconcile_orphaned_llm_attempts,
 )
+from app.store.llm_credentials import DecryptedCredential
 
 
-def _context(*, classification: str = "confidential", pool: Any = None):
+class _ProviderLease:
+    def __init__(self, client: Any, events: list[str]) -> None:
+        self.client = client
+        self._events = events
+
+    async def retire(self) -> None:
+        self._events.append("client:retired")
+
+    async def release(self) -> None:
+        self._events.append("client:released")
+
+
+def _context(
+    *,
+    classification: str = "confidential",
+    pool: Any = None,
+    llm_runtime: Any = None,
+):
     return LlmRequestContext(
         pool=pool or object(),
+        llm_runtime=llm_runtime if llm_runtime is not None else object(),
         project_id="projectA",
         run_id="run1",
         execution_kind="agent_run",
@@ -88,6 +113,7 @@ class _GovernanceRecorder:
     events: list[str] = field(default_factory=list)
     attempt_finishes: list[dict[str, Any]] = field(default_factory=list)
     call_finishes: list[dict[str, Any]] = field(default_factory=list)
+    provider_client: Any = field(default_factory=object)
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
         expected_call_id = uuid4()
@@ -162,6 +188,12 @@ class _GovernanceRecorder:
             self.events.append("credential:loaded")
             return "project-provider-key"
 
+        async def acquire_client(context, prepared, api_key):
+            del context, prepared
+            assert api_key == "project-provider-key"
+            self.events.append("client:leased")
+            return _ProviderLease(self.provider_client, self.events)
+
         async def mark(context, *, attempt_id):
             assert isinstance(attempt_id, UUID)
             self.events.append("attempt:in_flight")
@@ -184,6 +216,7 @@ class _GovernanceRecorder:
         monkeypatch.setattr(router, "begin_llm_call", begin)
         monkeypatch.setattr(router, "prepare_provider_attempt", prepare)
         monkeypatch.setattr(router, "_load_attempt_api_key", load_key)
+        monkeypatch.setattr(router, "_acquire_provider_client", acquire_client)
         monkeypatch.setattr(router, "mark_provider_egress", mark)
         monkeypatch.setattr(router, "finish_provider_attempt", finish_attempt)
         monkeypatch.setattr(
@@ -229,6 +262,94 @@ def test_google_usage_includes_tool_prompt_and_thought_tokens():
 
 
 @pytest.mark.asyncio
+async def test_exact_client_is_reused_without_bypassing_vault_revalidation():
+    credential_id = UUID("10000000-0000-4000-8000-000000000001")
+    vault_calls: list[tuple[UUID, int]] = []
+    created: list[object] = []
+    closed: list[object] = []
+
+    class Vault:
+        async def load_active(self, project_id, provider, **kwargs):
+            assert (project_id, provider) == ("projectA", "openai")
+            vault_calls.append(
+                (kwargs["credential_id"], kwargs["credential_version"])
+            )
+            return DecryptedCredential(
+                credential_id=kwargs["credential_id"],
+                project_id=project_id,
+                provider=provider,
+                credential_version=kwargs["credential_version"],
+                api_key=f"secret-{kwargs['credential_version']}",
+            )
+
+    async def factory(identity, api_key):
+        client = object()
+        created.append(client)
+
+        async def close():
+            closed.append(client)
+
+        assert api_key == f"secret-{identity.credential_version}"
+        return OwnedProviderClient(client, close)
+
+    cache = ProviderClientCache(max_entries=2, factory=factory)
+    runtime = SimpleNamespace(credential_store=Vault(), provider_clients=cache)
+    context = LlmRequestContext(
+        pool=object(),
+        llm_runtime=runtime,
+        project_id="projectA",
+        run_id="run1",
+        execution_kind="agent_run",
+        purpose="agent.test.reason",
+        data_classification="confidential",
+        execution_owner_id="worker-1",
+    )
+    policy = _provider("openai", "model-a")
+
+    def prepared(version: int) -> PreparedLlmAttempt:
+        return PreparedLlmAttempt(
+            attempt_id=uuid4(),
+            reserved_cost_usd_micros=10_000,
+            provider_policy=policy,
+            credential_id=credential_id,
+            credential_version=version,
+            setup_version=7,
+            model_tier="fast",
+            connection_version=version,
+            inventory_version=5,
+            model_catalog_version="llm-provider-catalog@2",
+        )
+
+    first_attempt = prepared(1)
+    first_key = await router._load_attempt_api_key(context, first_attempt)
+    first = await router._acquire_provider_client(context, first_attempt, first_key)
+    first_client = first.client
+    await first.release()
+
+    repeated_attempt = prepared(1)
+    repeated_key = await router._load_attempt_api_key(context, repeated_attempt)
+    repeated = await router._acquire_provider_client(
+        context, repeated_attempt, repeated_key
+    )
+    assert repeated.client is first_client
+    await repeated.release()
+
+    rotated_attempt = prepared(2)
+    rotated_key = await router._load_attempt_api_key(context, rotated_attempt)
+    rotated = await router._acquire_provider_client(
+        context, rotated_attempt, rotated_key
+    )
+
+    assert rotated.client is not first_client
+    assert vault_calls == [(credential_id, 1), (credential_id, 1), (credential_id, 2)]
+    assert len(created) == 2
+    assert closed == [first_client]
+
+    await rotated.release()
+    await cache.aclose()
+
+
+@pytest.mark.asyncio
 async def test_actual_usage_is_audited_before_plain_content_is_returned(monkeypatch):
     provider = _provider("openai", "model-a")
     recorder = _GovernanceRecorder(_policy(provider))
@@ -248,6 +369,9 @@ async def test_actual_usage_is_audited_before_plain_content_is_returned(monkeypa
         "attempt:succeeded"
     )
     assert recorder.events.index("credential:loaded") < recorder.events.index(
+        "client:leased"
+    )
+    assert recorder.events.index("client:leased") < recorder.events.index(
         "attempt:in_flight"
     )
     assert recorder.events.index("attempt:in_flight") < recorder.events.index(
@@ -297,13 +421,7 @@ async def test_xai_plain_completion_uses_the_governed_provider_path(monkeypatch)
             )()
         },
     )()
-    endpoints: list[str] = []
-
-    def get_xai(_api_key: str, endpoint_url: str):
-        endpoints.append(endpoint_url)
-        return client
-
-    monkeypatch.setattr(router, "_get_xai", get_xai)
+    recorder.provider_client = client
 
     answer = await router.chat_completion("reasoning", _MESSAGES, context=_context())
 
@@ -312,7 +430,8 @@ async def test_xai_plain_completion_uses_the_governed_provider_path(monkeypatch)
     assert recorder.attempt_finishes[0]["input_tokens"] == 13
     assert recorder.attempt_finishes[0]["output_tokens"] == 5
     assert recorder.call_finishes[-1]["status"] == "succeeded"
-    assert endpoints == ["https://xai.example/v1"]
+    assert "client:leased" in recorder.events
+    assert "client:released" in recorder.events
 
 
 @pytest.mark.asyncio
@@ -510,6 +629,90 @@ async def test_budget_denial_terminalizes_logical_call_before_egress(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_egress_mark_failure_retires_the_prepared_client(monkeypatch):
+    provider = _provider("openai", "model-a")
+    recorder = _GovernanceRecorder(_policy(provider))
+    recorder.install(monkeypatch)
+    invoked = False
+
+    async def fail_mark(context, *, attempt_id):
+        del context, attempt_id
+        raise LlmGovernanceUnavailableError("egress authorization unavailable")
+
+    async def must_not_run(model, messages, **kwargs):
+        nonlocal invoked
+        invoked = True
+        return router.TextCompletion("unsafe")
+
+    monkeypatch.setattr(router, "mark_provider_egress", fail_mark)
+    monkeypatch.setitem(router._PROVIDER_FN, "openai", must_not_run)
+
+    with pytest.raises(LlmGovernanceUnavailableError):
+        await router.chat_completion("fast", _MESSAGES, context=_context())
+
+    assert invoked is False
+    assert recorder.events.index("client:leased") < recorder.events.index(
+        "client:retired"
+    )
+    assert recorder.events.index("client:retired") < recorder.events.index(
+        "client:released"
+    )
+    assert recorder.attempt_finishes[-1]["status"] == "blocked"
+    assert (
+        recorder.call_finishes[-1]["error_classification"]
+        == "governance_unavailable"
+    )
+
+
+@pytest.mark.asyncio
+async def test_superseded_client_identity_is_durably_credential_unavailable(
+    monkeypatch,
+):
+    provider = _provider("openai", "model-a")
+    recorder = _GovernanceRecorder(_policy(provider))
+    acquire_provider_client = router._acquire_provider_client
+    recorder.install(monkeypatch)
+    monkeypatch.setattr(
+        router,
+        "_acquire_provider_client",
+        acquire_provider_client,
+    )
+    invoked = False
+
+    class SupersededCache:
+        async def acquire(self, identity, api_key):
+            assert identity.connection_version == 3
+            assert api_key == "project-provider-key"
+            raise ProviderClientRetiredError("stale identity")
+
+    async def must_not_run(model, messages, **kwargs):
+        nonlocal invoked
+        invoked = True
+        return router.TextCompletion("unsafe")
+
+    runtime = SimpleNamespace(provider_clients=SupersededCache())
+    monkeypatch.setitem(router._PROVIDER_FN, "openai", must_not_run)
+
+    with pytest.raises(LlmCredentialUnavailableError, match="superseded"):
+        await router.chat_completion(
+            "fast",
+            _MESSAGES,
+            context=_context(llm_runtime=runtime),
+        )
+
+    assert invoked is False
+    assert recorder.attempt_finishes[-1]["status"] == "blocked"
+    assert (
+        recorder.attempt_finishes[-1]["error_classification"]
+        == "credential_unavailable"
+    )
+    assert (
+        recorder.call_finishes[-1]["error_classification"]
+        == "credential_unavailable"
+    )
+
+
+@pytest.mark.asyncio
 async def test_audit_failure_after_successful_egress_fails_closed(monkeypatch):
     provider = _provider("openai", "model-a")
     recorder = _GovernanceRecorder(_policy(provider))
@@ -557,11 +760,6 @@ async def test_tool_completion_uses_the_same_governance_path(monkeypatch):
     provider = _provider("openai", "model-a")
     recorder = _GovernanceRecorder(_policy(provider))
     recorder.install(monkeypatch)
-    monkeypatch.setattr(
-        router,
-        "_get_openai",
-        lambda _api_key, _endpoint_url: object(),
-    )
 
     async def tool_invoke(*args, **kwargs):
         return router.ToolCompletion("tool answer", input_tokens=9, output_tokens=4)
@@ -944,6 +1142,7 @@ class _InactiveOwnerConn:
 async def test_stale_supervisor_owner_cannot_begin_a_logical_call():
     context = LlmRequestContext(
         pool=_ReconcilePool(_InactiveOwnerConn()),
+        llm_runtime=object(),
         project_id="projectA",
         run_id="run1",
         execution_kind="agent_run",

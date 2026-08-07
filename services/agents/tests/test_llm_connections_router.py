@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -10,7 +11,11 @@ import pytest
 
 from app.llm.provider_catalog import ProviderModel
 from app.main import app
-from app.store.llm_connections import ConnectionMetadata
+from app.store.llm_connections import (
+    ConnectionMetadata,
+    LlmConnectionConflictError,
+    LlmConnectionNotFoundError,
+)
 
 
 def _model(provider: str = "openai") -> ProviderModel:
@@ -68,6 +73,21 @@ class FakeConnectionStore:
         return self.connection, self.inventory
 
 
+class FailingConnectionStore:
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+
+    async def list(self, project_id: str) -> tuple[ConnectionMetadata, ...]:
+        raise self.error
+
+    async def get_active_with_models(
+        self,
+        project_id: str,
+        provider: str,
+    ) -> tuple[ConnectionMetadata, tuple[ProviderModel, ...]]:
+        raise self.error
+
+
 @pytest.fixture
 def connection_store() -> FakeConnectionStore:
     store = FakeConnectionStore()
@@ -123,6 +143,77 @@ async def test_model_inventory_rejects_noncanonical_provider_paths(
 
     assert response.status_code == 422
     assert connection_store.model_requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/v1/agents/llm-connections",
+        "/v1/agents/llm-connections/openai/models",
+    ],
+)
+async def test_unexpected_projection_errors_are_logged_without_leaking_details(
+    caplog: pytest.LogCaptureFixture,
+    path: str,
+) -> None:
+    secret = "provider-secret-must-not-leak"
+    app.state.llm_connection_store = FailingConnectionStore(RuntimeError(secret))
+
+    with caplog.at_level(logging.ERROR, logger="app.routers.llm_connections"):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            response = await client.get(
+                path,
+                params={"project_id": "demo"},
+                headers={"X-API-Key": "ignored-by-test-auth"},
+            )
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "detail": "LLM connection projection is unavailable"
+    }
+    assert secret not in response.text
+    assert secret not in caplog.text
+    assert "Traceback" in caplog.text
+    assert "RuntimeError: details redacted" in caplog.text
+    assert (
+        "LLM connection projection storage operation failed "
+        "(exception_type=RuntimeError)" in caplog.text
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "expected_status"),
+    [
+        (LlmConnectionNotFoundError("Provider connection not found"), 404),
+        (LlmConnectionConflictError("Provider model inventory is unavailable"), 409),
+    ],
+)
+async def test_expected_projection_errors_are_mapped_without_error_logs(
+    caplog: pytest.LogCaptureFixture,
+    error: Exception,
+    expected_status: int,
+) -> None:
+    app.state.llm_connection_store = FailingConnectionStore(error)
+
+    with caplog.at_level(logging.ERROR, logger="app.routers.llm_connections"):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            response = await client.get(
+                "/v1/agents/llm-connections/openai/models",
+                params={"project_id": "demo"},
+                headers={"X-API-Key": "ignored-by-test-auth"},
+            )
+
+    assert response.status_code == expected_status
+    assert response.json() == {"detail": str(error)}
+    assert "LLM connection projection storage operation failed" not in caplog.text
 
 
 @pytest.mark.asyncio

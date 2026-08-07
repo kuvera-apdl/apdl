@@ -71,10 +71,10 @@ describe('formToCreatePayload', () => {
         id: 'rule_x',
         name: '',
         conditions: [
-          { attribute: 'beta', operator: 'exists', value: '', values: [] },
-          { attribute: 'plan', operator: 'equals', value: 'pro', values: [] },
-          { attribute: 'age', operator: 'gte', value: '18', values: [] },
-          { attribute: 'country', operator: 'in', value: '', values: ['US', 'CA'] },
+          { attribute: 'beta', operator: 'exists', valueType: 'string', value: '', values: [] },
+          { attribute: 'plan', operator: 'equals', valueType: 'string', value: 'pro', values: [] },
+          { attribute: 'age', operator: 'gte', valueType: 'number', value: '18', values: [] },
+          { attribute: 'country', operator: 'in', valueType: 'string', value: '', values: ['US', 'CA'] },
         ],
         rollout: { percentage: 50, bucket_by: 'user_id' },
       },
@@ -87,6 +87,42 @@ describe('formToCreatePayload', () => {
     expect(conditions[1]).toEqual({ attribute: 'plan', operator: 'equals', value: 'pro' })
     expect(conditions[2]).toEqual({ attribute: 'age', operator: 'gte', value: 18 })
     expect(conditions[3]).toEqual({ attribute: 'country', operator: 'in', value: ['US', 'CA'] })
+  })
+
+  test('rejects an invalid typed numeric condition before wire projection', () => {
+    const values = baseValues()
+    values.rules = [
+      {
+        id: 'rule_invalid',
+        name: '',
+        conditions: [
+          {
+            attribute: 'age',
+            operator: 'equals',
+            valueType: 'number',
+            value: 'not-a-number',
+            values: [],
+          },
+        ],
+        rollout: { percentage: 50, bucket_by: 'user_id' },
+      },
+    ]
+
+    const result = flagFormSchema.safeParse(values)
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.issues).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            path: ['rules', 0, 'conditions', 0, 'value'],
+            message: 'Use a finite number or canonical decimal',
+          }),
+        ]),
+      )
+    }
+    expect(() => formToCreatePayload(values)).toThrow(
+      'Use a finite number or canonical decimal',
+    )
   })
 })
 

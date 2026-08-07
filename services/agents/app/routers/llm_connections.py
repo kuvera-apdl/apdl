@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Literal
 
@@ -21,6 +22,7 @@ from app.store.llm_connections import (
 ProviderPath = Literal["openai", "anthropic", "google", "xai"]
 PROJECT_PATTERN = r"^[A-Za-z0-9]{1,64}$"
 router = APIRouter(prefix="/v1/agents/llm-connections", tags=["agents"])
+logger = logging.getLogger(__name__)
 
 
 class ProviderModelResponse(BaseModel):
@@ -130,6 +132,12 @@ def _store_error(exc: Exception) -> HTTPException:
         return HTTPException(status_code=404, detail=str(exc))
     if isinstance(exc, LlmConnectionConflictError):
         return HTTPException(status_code=409, detail=str(exc))
+    safe_exc = RuntimeError("details redacted").with_traceback(exc.__traceback__)
+    logger.exception(
+        "LLM connection projection storage operation failed (exception_type=%s)",
+        type(exc).__name__,
+        exc_info=(type(safe_exc), safe_exc, safe_exc.__traceback__),
+    )
     return HTTPException(
         status_code=503, detail="LLM connection projection is unavailable"
     )

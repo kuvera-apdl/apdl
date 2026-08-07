@@ -41,6 +41,23 @@ describe('resolveConfig env defaults and fail-soft validation', () => {
     });
   });
 
+  it('prefers the canonical Next.js URL over the canonical server URL', () => {
+    vi.stubEnv('NEXT_PUBLIC_APDL_URL', ENDPOINT);
+    vi.stubEnv('APDL_URL', 'https://server.example.com');
+    vi.stubEnv('NEXT_PUBLIC_APDL_CLIENT_KEY', CLIENT_KEY);
+
+    expect(resolveConfig({}, { strict: false })?.endpoint).toBe(ENDPOINT);
+  });
+
+  it('ignores removed endpoint environment variable names', () => {
+    vi.stubEnv('NEXT_PUBLIC_APDL_ENDPOINT', ENDPOINT);
+    vi.stubEnv('APDL_ENDPOINT', ENDPOINT);
+    vi.stubEnv('NEXT_PUBLIC_APDL_CLIENT_KEY', CLIENT_KEY);
+
+    expect(resolveConfig({}, { strict: false })).toBeNull();
+    expect(() => resolveConfig({}, { strict: true })).toThrow('endpoint is required');
+  });
+
   it('prefers explicit config over environment variables', () => {
     vi.stubEnv('NEXT_PUBLIC_APDL_URL', 'https://env.example.com');
 

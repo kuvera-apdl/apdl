@@ -187,10 +187,13 @@ Example degraded response:
 | `APDL_ADMIN_COOKIE_SECURE` | Must be `true` in HTTPS deployments |
 | `APDL_ADMIN_TRUSTED_PROXY_CIDRS` | JSON array of exact proxy networks allowed to supply one canonical `X-Forwarded-For` address; default is empty |
 | `APDL_ADMIN_LOGIN_RISK_HMAC_KEY` | Deployment-unique secret, at least 32 bytes, used to pseudonymize login-risk identities |
-| `APDL_ADMIN_LOGIN_RATE_WINDOW_SECONDS` | Global/network/device request-budget window; default 60 seconds |
+| `APDL_ADMIN_LOGIN_RATE_WINDOW_SECONDS` | Login and invitation request-budget window; default 60 seconds |
 | `APDL_ADMIN_LOGIN_GLOBAL_RATE_LIMIT` | Global login attempts per window; default 600 |
 | `APDL_ADMIN_LOGIN_NETWORK_RATE_LIMIT` | Login attempts per canonical client network address per window; default 30 |
 | `APDL_ADMIN_LOGIN_DEVICE_RATE_LIMIT` | Login attempts per opaque device cookie per window; default 20 |
+| `APDL_ADMIN_INVITATION_GLOBAL_RATE_LIMIT` | Global invitation requests per window, isolated from login; default 600 |
+| `APDL_ADMIN_INVITATION_NETWORK_RATE_LIMIT` | Invitation requests per canonical client network address per window; default 30 |
+| `APDL_ADMIN_INVITATION_TOKEN_RATE_LIMIT` | Requests per invitation token digest per window; default 20 |
 | `APDL_ADMIN_LOGIN_PROGRESSIVE_FAILURE_THRESHOLD` | Per-email network/device failure count that starts progressive delay; default 3 |
 | `APDL_ADMIN_LOGIN_PROGRESSIVE_BASE_DELAY_SECONDS` | Initial progressive delay; default 1 second |
 | `APDL_ADMIN_LOGIN_PROGRESSIVE_MAX_DELAY_SECONDS` | Progressive delay cap; default 60 seconds |

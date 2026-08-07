@@ -85,6 +85,7 @@ async def test_resume_skips_completed_and_runs_remaining(monkeypatch) -> None:
     await supervisor.run_supervisor(
         pool=pool,
         vector_store=object(),
+        llm_runtime=object(),
         run_id="run-1",
         project_id="demo",
         analysis_types=["experiment_design", "feature_proposal"],
@@ -126,6 +127,7 @@ async def test_resume_finishes_with_errors_after_approved_deploy_failure(monkeyp
     await supervisor.run_supervisor(
         pool=pool,
         vector_store=object(),
+        llm_runtime=object(),
         run_id="run-1",
         project_id="demo",
         analysis_types=["experiment_design"],
@@ -172,6 +174,7 @@ async def test_recovered_run_restores_persisted_pending_gate(monkeypatch) -> Non
     await supervisor.run_supervisor(
         pool=pool,
         vector_store=object(),
+        llm_runtime=object(),
         run_id="run-1",
         project_id="demo",
         analysis_types=["experiment_design"],
@@ -210,6 +213,7 @@ async def test_post_result_bookkeeping_runs_after_durable_result(monkeypatch) ->
     await supervisor.run_supervisor(
         pool=pool,
         vector_store=object(),
+        llm_runtime=object(),
         run_id="run-1",
         project_id="demo",
         analysis_types=["behavior_analysis"],

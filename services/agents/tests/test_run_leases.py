@@ -408,6 +408,23 @@ async def test_starting_multiple_replicas_preserves_live_run_and_proposal(
     }
     proposals = {"proposal-live": _proposal("implementing", "run-live")}
     pool = _Pool(now, runs, proposals)
+    runtimes: list[Any] = []
+
+    class FakeRuntime:
+        def __init__(self) -> None:
+            self.closed = False
+            self.pool_close_count_at_close: int | None = None
+
+        async def aclose(self) -> None:
+            self.pool_close_count_at_close = pool.close_count
+            self.closed = True
+
+    class RuntimeFactory:
+        @staticmethod
+        def from_environment() -> FakeRuntime:
+            runtime = FakeRuntime()
+            runtimes.append(runtime)
+            return runtime
 
     async def fake_create_pool(*args: Any, **kwargs: Any) -> _Pool:
         return pool
@@ -423,6 +440,7 @@ async def test_starting_multiple_replicas_preserves_live_run_and_proposal(
         return SimpleNamespace(prepared_blocked=0, in_flight_cancelled=0)
 
     monkeypatch.setattr(agents_main.asyncpg, "create_pool", fake_create_pool)
+    monkeypatch.setattr(agents_main, "LlmRuntime", RuntimeFactory)
     monkeypatch.setattr(agents_main, "assert_schema_ready", fake_schema_ready)
     monkeypatch.setattr(agents_main, "requeue_expired_runs_forever", idle_worker)
     monkeypatch.setattr(agents_main, "dispatch_runs_forever", idle_worker)
@@ -440,8 +458,13 @@ async def test_starting_multiple_replicas_preserves_live_run_and_proposal(
         application = SimpleNamespace(state=SimpleNamespace())
         async with agents_main.lifespan(application):
             assert application.state.pg_pool is pool
+            assert application.state.llm_runtime is runtimes[-1]
 
     assert pool.close_count == 2
+    assert len(runtimes) == 2
+    assert runtimes[0] is not runtimes[1]
+    assert [runtime.closed for runtime in runtimes] == [True, True]
+    assert [runtime.pool_close_count_at_close for runtime in runtimes] == [0, 1]
     assert runs["run-live"]["status"] == "running"
     assert runs["run-live"]["lease_owner_id"] == "worker-a"
     assert proposals["proposal-live"]["status"] == "implementing"
@@ -757,6 +780,7 @@ async def test_lost_supervisor_cancels_agent_and_retains_expired_owner(
     await supervisor.run_supervisor(
         pool=pool,
         vector_store=object(),
+        llm_runtime=object(),
         run_id="run-loss",
         project_id="demo",
         analysis_types=["code_implementation"],

@@ -27,6 +27,7 @@ class _FakeAudit:
 def make_ctx(autonomy_level: int = 4) -> AgentContext:
     return AgentContext(
         pool=None,
+        llm_runtime=object(),
         vector_store=None,
         audit=_FakeAudit(),
         run_id="run-1",

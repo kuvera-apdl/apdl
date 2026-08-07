@@ -69,7 +69,7 @@ Prerequisites: [uv](https://docs.astral.sh/uv/), Docker, Node.js 20.19+, Python 
 
 ```bash
 git clone https://github.com/kuvera-apdl/apdl.git && cd apdl
-cp .env.example .env
+make setup               # dependencies + per-install local secrets
 make dev-core            # supported core + local Admin console
 ```
 

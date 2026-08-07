@@ -9,7 +9,6 @@ import {
   experimentBucketBySchema,
   experimentCreateStatusSchema,
   experimentPathKeySchema,
-  experimentTargetingRuleSchema,
 } from '@/api/schemas/experiments'
 import type {
   ExperimentBucketBy,
@@ -26,12 +25,16 @@ import { Disclosure } from '@/components/ui/disclosure'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select } from '@/components/ui/select'
-import { MAX_RULES } from '@/core/evaluator/targetingContract'
+import { MEMBERSHIP_OPERATORS } from '@/core/evaluator/targetingContract'
 
 import {
   ExperimentTargetingRules,
+  safeTargetingRulesToWire,
+  targetingConditionErrorKey,
   targetingRulesToFormValues,
   targetingRulesToWire,
+  type ExperimentTargetingErrors,
+  type ExperimentTargetingRuleErrors,
   type ExperimentTargetingRuleFormValue,
 } from './ExperimentTargetingRules'
 
@@ -49,9 +52,30 @@ const STATUS_TRANSITIONS: Record<ExperimentStatus, ExperimentStatus[]> = {
 const METRIC_DIRECTIONS = ['increase', 'decrease'] as const
 const MAX_EXPERIMENT_VARIANTS = 10
 const MAX_EXPERIMENT_DURATION_MS = 90 * 24 * 60 * 60 * 1000
+const UTC_DATE_TIME_INPUT_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/
 
-function toDateInputValue(value: string | null): string {
-  return value?.slice(0, 10) ?? ''
+const utcDateTimeInputSchema = z
+  .string()
+  .regex(UTC_DATE_TIME_INPUT_PATTERN)
+  .refine((value) => {
+    const instant = new Date(`${value}Z`)
+    return (
+      !Number.isNaN(instant.getTime()) && instant.toISOString().slice(0, 19) === value
+    )
+  })
+
+const optionalUtcDateTimeInputSchema = z.union([
+  z.literal('').transform(() => null),
+  utcDateTimeInputSchema.transform((value) => `${value}Z`),
+])
+
+function toUtcDateTimeInputValue(value: string | null): string {
+  if (value === null) return ''
+  return new Date(value).toISOString().slice(0, 19)
+}
+
+function normalizeUtcDateTimeInputValue(value: string): string {
+  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(value) ? `${value}:00` : value
 }
 
 export interface ExperimentVariantRow {
@@ -117,8 +141,8 @@ export function entryToFormValues(entry: ExperimentEntry): ExperimentFormValues 
     description: entry.description,
     bucket_by: entry.bucket_by,
     traffic_percentage: entry.traffic_percentage,
-    start_date: toDateInputValue(entry.start_date),
-    end_date: toDateInputValue(entry.end_date),
+    start_date: toUtcDateTimeInputValue(entry.start_date),
+    end_date: toUtcDateTimeInputValue(entry.end_date),
     variants: entry.variants.map((variant) => ({
       key: variant.key,
       weight: variant.weight,
@@ -167,16 +191,7 @@ function buildStatisticalPlan(values: ExperimentFormValues): ExperimentStatistic
 }
 
 function toAwareDateTime(value: string): string | null {
-  const trimmed = value.trim()
-  if (trimmed === '') return null
-  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return `${trimmed}T00:00:00Z`
-  return trimmed
-}
-
-function isAwareDateTime(value: string | null): boolean {
-  return value === null || (
-    /(?:Z|[+-]\d{2}:\d{2})$/.test(value) && !Number.isNaN(Date.parse(value))
-  )
+  return optionalUtcDateTimeInputSchema.parse(value)
 }
 
 export function buildCreate(values: ExperimentFormValues): ExperimentCreate {
@@ -232,8 +247,12 @@ export function buildUpdate(
     const primaryMetric = buildMetric(values)
     const statisticalPlan = primaryMetric ? buildStatisticalPlan(values) : null
 
-    if (values.start_date !== toDateInputValue(base.start_date)) update.start_date = startDate
-    if (values.end_date !== toDateInputValue(base.end_date)) update.end_date = endDate
+    if (values.start_date !== toUtcDateTimeInputValue(base.start_date)) {
+      update.start_date = startDate
+    }
+    if (values.end_date !== toUtcDateTimeInputValue(base.end_date)) {
+      update.end_date = endDate
+    }
     if (!same(variants, base.variants)) update.variants = variants
     if (values.default_variant !== base.default_variant) {
       update.default_variant = values.default_variant
@@ -253,10 +272,74 @@ interface ExperimentFormErrors {
   bucket_by?: string
   variants?: string
   default_variant?: string
-  targeting?: string
+  targeting?: ExperimentTargetingErrors
   dates?: string
   metric?: string
   statisticalPlan?: string
+}
+
+function targetingErrorsFromIssues(
+  values: ExperimentFormValues,
+  issues: z.ZodIssue[],
+): ExperimentTargetingErrors {
+  const errors: ExperimentTargetingErrors = { rules: {} }
+
+  const ruleErrorsFor = (ruleId: string): ExperimentTargetingRuleErrors => {
+    const existing = errors.rules[ruleId]
+    if (existing) return existing
+    const created: ExperimentTargetingRuleErrors = { conditions: {} }
+    errors.rules[ruleId] = created
+    return created
+  }
+
+  for (const issue of issues) {
+    const [ruleIndex, ruleField, conditionIndex, conditionField] = issue.path
+    if (typeof ruleIndex !== 'number') {
+      errors.root ??= issue.message
+      continue
+    }
+
+    const rule = values.targetingRules[ruleIndex]
+    if (!rule) {
+      errors.root ??= issue.message
+      continue
+    }
+    const ruleErrors = ruleErrorsFor(rule.id)
+
+    if (ruleField === 'name') {
+      ruleErrors.name ??= issue.message
+      continue
+    }
+    if (ruleField !== 'conditions') {
+      ruleErrors.root ??= issue.message
+      continue
+    }
+    if (typeof conditionIndex !== 'number') {
+      ruleErrors.conditionsRoot ??= issue.message
+      continue
+    }
+
+    const condition = rule.conditions[conditionIndex]
+    if (!condition) {
+      ruleErrors.conditionsRoot ??= issue.message
+      continue
+    }
+    const conditionKey = targetingConditionErrorKey(condition, conditionIndex)
+    const conditionErrors = ruleErrors.conditions[conditionKey] ?? {}
+    ruleErrors.conditions[conditionKey] = conditionErrors
+
+    if (conditionField === 'attribute') conditionErrors.attribute ??= issue.message
+    else if (conditionField === 'operator') conditionErrors.operator ??= issue.message
+    else if (
+      conditionField === 'values' ||
+      (conditionField === 'value' && MEMBERSHIP_OPERATORS.has(condition.operator))
+    ) {
+      conditionErrors.values ??= issue.message
+    } else if (conditionField === 'value') conditionErrors.value ??= issue.message
+    else ruleErrors.root ??= issue.message
+  }
+
+  return errors
 }
 
 export function validateExperimentForm(values: ExperimentFormValues): ExperimentFormErrors {
@@ -285,18 +368,17 @@ export function validateExperimentForm(values: ExperimentFormValues): Experiment
     errors.default_variant = 'Choose a control variant that matches a variant key'
   }
 
-  const rules = z
-    .array(experimentTargetingRuleSchema)
-    .max(MAX_RULES)
-    .safeParse(targetingRulesToWire(values.targetingRules))
+  const rules = safeTargetingRulesToWire(values.targetingRules)
   if (!rules.success) {
-    errors.targeting = 'Each targeting condition needs a valid type, operator, and value'
+    errors.targeting = targetingErrorsFromIssues(values, rules.error.issues)
   }
 
-  const start = toAwareDateTime(values.start_date)
-  const end = toAwareDateTime(values.end_date)
-  if (!isAwareDateTime(start) || !isAwareDateTime(end)) {
-    errors.dates = 'Use YYYY-MM-DD or an ISO 8601 timestamp with a timezone'
+  const startResult = optionalUtcDateTimeInputSchema.safeParse(values.start_date)
+  const endResult = optionalUtcDateTimeInputSchema.safeParse(values.end_date)
+  const start = startResult.success ? startResult.data : null
+  const end = endResult.success ? endResult.data : null
+  if (!startResult.success || !endResult.success) {
+    errors.dates = 'Use YYYY-MM-DDTHH:mm:ss in UTC'
   } else if (end !== null && start === null) {
     errors.dates = 'End date requires a start date'
   } else if (start !== null && end !== null && Date.parse(end) <= Date.parse(start)) {
@@ -490,7 +572,7 @@ export function ExperimentForm({
             data-testid="variant-column-headings"
           >
             <span className="text-sm font-medium leading-none">Key</span>
-            <span className="text-sm font-medium leading-none">User proportion</span>
+            <span className="text-sm font-medium leading-none">Relative Weight</span>
             <span className="text-sm font-medium leading-none">Comment</span>
             <span aria-hidden="true" />
           </div>
@@ -514,8 +596,8 @@ export function ExperimentForm({
               </div>
               <div className="space-y-1.5">
                 <Label htmlFor={`${variantFieldsId}-${index}-weight`} className="sm:sr-only">
-                  <span aria-hidden="true">User proportion</span>
-                  <span className="sr-only">User proportion for variant {index + 1}</span>
+                  <span aria-hidden="true">Relative Weight</span>
+                  <span className="sr-only">Relative Weight for variant {index + 1}</span>
                 </Label>
                 <Input
                   id={`${variantFieldsId}-${index}-weight`}
@@ -771,24 +853,33 @@ export function ExperimentForm({
             </div>
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-1.5">
-                <Label htmlFor="experiment-start-date">Start date</Label>
+                <Label htmlFor="experiment-start-date">Start (UTC)</Label>
                 <Input
                   id="experiment-start-date"
-                  type="date"
+                  type="datetime-local"
+                  step={1}
                   value={values.start_date}
-                  onChange={(event) => set({ start_date: event.target.value })}
+                  onChange={(event) =>
+                    set({ start_date: normalizeUtcDateTimeInputValue(event.target.value) })
+                  }
                 />
               </div>
               <div className="space-y-1.5">
-                <Label htmlFor="experiment-end-date">End date</Label>
+                <Label htmlFor="experiment-end-date">End (UTC)</Label>
                 <Input
                   id="experiment-end-date"
-                  type="date"
+                  type="datetime-local"
+                  step={1}
                   value={values.end_date}
-                  onChange={(event) => set({ end_date: event.target.value })}
+                  onChange={(event) =>
+                    set({ end_date: normalizeUtcDateTimeInputValue(event.target.value) })
+                  }
                 />
               </div>
             </div>
+            <p className="text-xs text-muted-foreground">
+              Times are shown and saved in UTC.
+            </p>
             {errors.dates ? <p className="text-xs text-destructive">{errors.dates}</p> : null}
 
             <div className="space-y-1.5">
@@ -796,8 +887,8 @@ export function ExperimentForm({
                 value={values.targetingRules}
                 onChange={(targetingRules) => set({ targetingRules })}
                 disabled={analysisFieldsLocked}
+                errors={errors.targeting}
               />
-              {errors.targeting ? <p className="text-xs text-destructive">{errors.targeting}</p> : null}
             </div>
           </div>
         </Disclosure>

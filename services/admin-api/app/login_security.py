@@ -153,9 +153,10 @@ async def _consume_rate_bucket(
     return max(1, math.ceil((retry_at - now).total_seconds()))
 
 
-async def preflight_auth_rate_limit(
+async def _preflight_rate_limits(
     conn,
-    source: LoginSource,
+    *,
+    buckets: tuple[tuple[str, str, int], ...],
     settings: Settings,
     now: datetime,
 ) -> int:
@@ -167,11 +168,7 @@ async def preflight_auth_rate_limit(
         now - timedelta(seconds=settings.login_rate_window_seconds * 2),
     )
     retry_after = 0
-    for scope, key_hash, limit in (
-        ("global", source.global_hash, settings.login_global_rate_limit),
-        ("network", source.network_hash, settings.login_network_rate_limit),
-        ("device", source.device_hash, settings.login_device_rate_limit),
-    ):
+    for scope, key_hash, limit in buckets:
         retry_after = max(
             retry_after,
             await _consume_rate_bucket(
@@ -185,6 +182,59 @@ async def preflight_auth_rate_limit(
         )
 
     return retry_after
+
+
+async def preflight_auth_rate_limit(
+    conn,
+    source: LoginSource,
+    settings: Settings,
+    now: datetime,
+) -> int:
+    return await _preflight_rate_limits(
+        conn,
+        buckets=(
+            ("global", source.global_hash, settings.login_global_rate_limit),
+            ("network", source.network_hash, settings.login_network_rate_limit),
+            ("device", source.device_hash, settings.login_device_rate_limit),
+        ),
+        settings=settings,
+        now=now,
+    )
+
+
+async def preflight_invitation_rate_limit(
+    conn,
+    source: LoginSource,
+    settings: Settings,
+    now: datetime,
+) -> int:
+    invitation_global_hash = _risk_hash(
+        settings.login_risk_hmac_key,
+        "global",
+        "admin-invitation",
+    )
+    return await _preflight_rate_limits(
+        conn,
+        buckets=(
+            (
+                "invitation_global",
+                invitation_global_hash,
+                settings.invitation_global_rate_limit,
+            ),
+            (
+                "invitation_network",
+                source.network_hash,
+                settings.invitation_network_rate_limit,
+            ),
+            (
+                "invitation_token",
+                source.email_hash,
+                settings.invitation_token_rate_limit,
+            ),
+        ),
+        settings=settings,
+        now=now,
+    )
 
 
 async def preflight_login(

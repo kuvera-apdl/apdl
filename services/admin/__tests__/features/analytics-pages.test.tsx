@@ -128,6 +128,9 @@ describe('EventsExplorerPage', () => {
       renderPage(<EventsExplorerPage />)
 
       await waitFor(() => expect(catalogRequests).toHaveLength(1))
+      expect(
+        screen.getByText('Event list shows events observed in the last 90 calendar days.'),
+      ).toBeVisible()
       expect(catalogRequests[0]).toEqual({
         project_id: 'demo',
         start_date: '2026-05-02',

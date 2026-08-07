@@ -7,14 +7,12 @@
 import { z } from 'zod'
 
 import {
-  conditionOperatorSchema,
   evaluationModeSchema,
   guardrailMetricSchema,
   guardrailThresholdSchema,
   writableFlagStateSchema,
 } from '@/api/schemas/flags'
 import type {
-  ConditionOperator,
   FlagConfig,
   FlagCreate,
   FlagUpdate,
@@ -27,72 +25,20 @@ import type { EvaluableFlag } from '@/core/evaluator/evaluate'
 import {
   MAX_CONDITIONS_PER_RULE,
   MAX_IDENTIFIER_LENGTH,
-  MAX_MEMBERSHIP_VALUES,
   MAX_RULES,
   MAX_STRING_LENGTH,
-  isConditionValueValid,
-  isScalar,
 } from '@/core/evaluator/targetingContract'
-
-export const EXISTENCE_OPERATORS: ReadonlySet<ConditionOperator> = new Set(['exists', 'not_exists'])
-export const LIST_OPERATORS: ReadonlySet<ConditionOperator> = new Set(['in', 'not_in'])
-export const NUMERIC_OPERATORS: ReadonlySet<ConditionOperator> = new Set(['gt', 'gte', 'lt', 'lte'])
+import {
+  targetingConditionFormSchema,
+  targetingConditionToFormValue,
+  targetingConditionToWire,
+} from '@/features/targeting/editorModel'
 
 // The enforced metric↔threshold pairing (schemas.py GuardrailConfig).
 export const GUARDRAIL_PAIRING: Record<GuardrailMetric, GuardrailThreshold> = {
   frontend_error_rate: '2x_baseline',
   frontend_error_count: 'at_least_one',
 }
-
-const conditionFormSchema = z
-  .object({
-    attribute: z
-      .string()
-      .trim()
-      .min(1, 'Attribute is required')
-      .max(MAX_IDENTIFIER_LENGTH, `At most ${MAX_IDENTIFIER_LENGTH} characters`),
-    operator: conditionOperatorSchema,
-    /** Preserve an existing JSON scalar until the user edits the text input. */
-    value: z.union([
-      z.string().max(MAX_STRING_LENGTH),
-      z.number().finite(),
-      z.boolean(),
-    ]),
-    /** Chip list for in / not_in. */
-    values: z
-      .array(z.union([
-        z.string().max(MAX_STRING_LENGTH),
-        z.number().finite(),
-        z.boolean(),
-      ]))
-      .max(MAX_MEMBERSHIP_VALUES),
-  })
-  .superRefine((condition, ctx) => {
-    if (EXISTENCE_OPERATORS.has(condition.operator)) return
-    if (LIST_OPERATORS.has(condition.operator)) {
-      if (
-        condition.values.length === 0 ||
-        condition.values.length > MAX_MEMBERSHIP_VALUES ||
-        !condition.values.every(isScalar)
-      ) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ['values'],
-          message: `Add 1–${MAX_MEMBERSHIP_VALUES} scalar values`,
-        })
-      }
-      return
-    }
-    if (!isConditionValueValid(condition.operator, condition.value)) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ['value'],
-        message: NUMERIC_OPERATORS.has(condition.operator)
-          ? 'Use a finite number or canonical decimal'
-          : `Invalid ${condition.operator.replace(/_/g, ' ')} value`,
-      })
-    }
-  })
 
 const rolloutFormSchema = z.object({
   percentage: z
@@ -109,7 +55,7 @@ const rolloutFormSchema = z.object({
 const ruleFormSchema = z.object({
   id: z.string().min(1).max(MAX_IDENTIFIER_LENGTH),
   name: z.string().max(MAX_STRING_LENGTH),
-  conditions: z.array(conditionFormSchema).max(MAX_CONDITIONS_PER_RULE),
+  conditions: z.array(targetingConditionFormSchema).max(MAX_CONDITIONS_PER_RULE),
   rollout: rolloutFormSchema,
 })
 
@@ -192,11 +138,7 @@ export const flagFormSchema = z
   })
 
 export type FlagFormValues = z.infer<typeof flagFormSchema>
-export type ConditionFormValues = z.infer<typeof conditionFormSchema>
-
-export function newRuleId(): string {
-  return `rule_${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`
-}
+export type ConditionFormValues = z.infer<typeof targetingConditionFormSchema>
 
 /** Create-mode defaults — mirrors the server's two-variant 1:1 template. */
 export function emptyFormValues(): FlagFormValues {
@@ -221,21 +163,7 @@ export function emptyFormValues(): FlagFormValues {
 }
 
 function conditionToForm(condition: GateCondition): ConditionFormValues {
-  if (EXISTENCE_OPERATORS.has(condition.operator)) {
-    return { attribute: condition.attribute, operator: condition.operator, value: '', values: [] }
-  }
-  if (LIST_OPERATORS.has(condition.operator)) {
-    const values = Array.isArray(condition.value)
-      ? condition.value.filter(isScalar)
-      : []
-    return { attribute: condition.attribute, operator: condition.operator, value: '', values }
-  }
-  return {
-    attribute: condition.attribute,
-    operator: condition.operator,
-    value: isScalar(condition.value) ? condition.value : '',
-    values: [],
-  }
+  return targetingConditionToFormValue(condition)
 }
 
 export function flagToFormValues(flag: FlagConfig): FlagFormValues {
@@ -264,30 +192,7 @@ export function flagToFormValues(flag: FlagConfig): FlagFormValues {
 
 /** Wire form: existence operators OMIT the value key (JSON.stringify drops undefined). */
 export function conditionToWire(condition: ConditionFormValues): GateCondition {
-  if (EXISTENCE_OPERATORS.has(condition.operator)) {
-    return { attribute: condition.attribute.trim(), operator: condition.operator }
-  }
-  if (LIST_OPERATORS.has(condition.operator)) {
-    return {
-      attribute: condition.attribute.trim(),
-      operator: condition.operator,
-      value: condition.values,
-    }
-  }
-  if (NUMERIC_OPERATORS.has(condition.operator)) {
-    return {
-      attribute: condition.attribute.trim(),
-      operator: condition.operator,
-      value: typeof condition.value === 'number'
-        ? condition.value
-        : Number(condition.value),
-    }
-  }
-  return {
-    attribute: condition.attribute.trim(),
-    operator: condition.operator,
-    value: condition.value,
-  }
+  return targetingConditionToWire(condition)
 }
 
 export function rulesToWire(values: FlagFormValues): GateRule[] {

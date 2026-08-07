@@ -40,9 +40,10 @@ export APDL_RUNTIME_POSTGRES_PASSWORD="apdl_runtime_dev"
 export APDL_AGENTS_POSTGRES_PASSWORD="apdl_agents_dev1"
 export APDL_LLM_VAULT_POSTGRES_PASSWORD="apdl_llm_vault_dev"
 export APDL_BIND_ADDRESS="127.0.0.1"
-# Public, disposable test-only platform keys for the isolated smoke database.
-# Compose exposes each value only to its owning controller.
-export LLM_VAULT_ENCRYPTION_KEY_BASE64="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+# Use a fresh disposable encryption key for every isolated smoke database.
+export LLM_VAULT_ENCRYPTION_KEY_BASE64="$(
+    python3 "$ROOT_DIR/scripts/llm_vault_key.py" generate
+)"
 export LLM_VAULT_ADMIN_TOKEN="smoke-llm-vault-admin-token-change-me"
 export LLM_VAULT_AGENTS_TOKEN="smoke-llm-vault-agents-token-change-me"
 export LLM_VAULT_CODEGEN_TOKEN="smoke-llm-vault-codegen-token-change-me"

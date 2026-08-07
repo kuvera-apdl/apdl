@@ -690,7 +690,9 @@ def _ensure_llm_vault_role(fence: MaintenanceFence) -> None:
     if password is None:
         # Migration/unit-test environments may validate the schema without
         # running the service. Migration 056 creates a fixed NOLOGIN role so
-        # grants remain deterministic in that mode.
+        # grants remain deterministic in that mode. Supported deployment
+        # migrations must keep this variable set on every run so login password
+        # reconciliation is not skipped.
         return
     if ROLE_PASSWORD.fullmatch(password) is None:
         raise MigrationError(

@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import os
 import uuid
+from pathlib import Path
 
 import asyncpg
 import pytest
@@ -22,11 +23,28 @@ from app.rotation import (
     MAINTENANCE_INHIBITOR_LOCK_ID,
     rotate_active_credentials,
 )
-from app.store import ProjectLlmVaultStore, VaultNotFoundError
+from app.store import (
+    ProjectLlmVaultStore,
+    VaultAuthorizationError,
+    VaultNotFoundError,
+)
 
 
 OWNER_URL = os.getenv("LLM_VAULT_TEST_OWNER_POSTGRES_URL", "").strip() or None
 VAULT_URL = os.getenv("LLM_VAULT_TEST_POSTGRES_URL", "").strip() or None
+ROOT = Path(__file__).resolve().parents[3]
+VAULT_MIGRATION = (
+    ROOT
+    / "pipeline"
+    / "postgres"
+    / "migrations"
+    / "056_project_llm_credential_vault.sql"
+).read_text(encoding="utf-8")
+PREFLIGHT_START = VAULT_MIGRATION.index(
+    "DO $apdl_require_empty_legacy_llm_credential_stores$"
+)
+PREFLIGHT_END = VAULT_MIGRATION.index("DO $apdl_ensure_llm_vault_role$")
+LEGACY_CREDENTIAL_PREFLIGHT = VAULT_MIGRATION[PREFLIGHT_START:PREFLIGHT_END]
 
 if os.getenv("GITHUB_ACTIONS") == "true" and (OWNER_URL is None or VAULT_URL is None):
     raise RuntimeError(
@@ -38,6 +56,41 @@ pytestmark = pytest.mark.skipif(
     OWNER_URL is None or VAULT_URL is None,
     reason="Live LLM Vault PostgreSQL URLs are not configured",
 )
+
+
+@pytest.mark.asyncio
+async def test_legacy_credential_history_requires_a_fresh_database() -> None:
+    assert OWNER_URL is not None
+    conn = await asyncpg.connect(OWNER_URL)
+    try:
+        await conn.execute(
+            """
+            CREATE TEMP TABLE llm_project_provider_credentials (
+                history_id INTEGER
+            );
+            CREATE TEMP TABLE codegen_project_provider_credentials (
+                history_id INTEGER
+            );
+            """
+        )
+        await conn.execute(LEGACY_CREDENTIAL_PREFLIGHT)
+
+        for table in (
+            "llm_project_provider_credentials",
+            "codegen_project_provider_credentials",
+        ):
+            await conn.execute(f"INSERT INTO {table} VALUES (1)")
+            with pytest.raises(asyncpg.PostgresError) as raised:
+                await conn.execute(LEGACY_CREDENTIAL_PREFLIGHT)
+            assert raised.value.sqlstate == "55000"
+            assert raised.value.hint == (
+                "Initialize a fresh PostgreSQL database, apply the canonical "
+                "migrations, and reconnect provider credentials; revocation "
+                "does not remove legacy credential history."
+            )
+            await conn.execute(f"TRUNCATE {table}")
+    finally:
+        await conn.close()
 
 
 def _projection() -> CodegenProjection:
@@ -136,6 +189,52 @@ async def _create_owner_project(project_id: str) -> uuid.UUID:
     finally:
         await conn.close()
     return actor_user_id
+
+
+@pytest.mark.asyncio
+async def test_create_revalidates_authority_after_preflight() -> None:
+    assert OWNER_URL is not None
+    assert VAULT_URL is not None
+    project_id = f"vaultrace{uuid.uuid4().hex}"
+    actor_user_id = await _create_owner_project(project_id)
+    key = bytes(range(32))
+    cipher = CredentialCipher.from_base64(base64.b64encode(key).decode("ascii"))
+    pool = await asyncpg.create_pool(VAULT_URL, min_size=1, max_size=2)
+    store = ProjectLlmVaultStore(pool, cipher)
+    try:
+        await store.assert_create_authority(
+            project_id=project_id,
+            actor_user_id=actor_user_id,
+        )
+        owner = await asyncpg.connect(OWNER_URL)
+        try:
+            await owner.execute(
+                "UPDATE admin_users SET active = FALSE WHERE user_id = $1",
+                actor_user_id,
+            )
+        finally:
+            await owner.close()
+
+        with pytest.raises(VaultAuthorizationError):
+            await store.create(
+                project_id=project_id,
+                provider="openai",
+                label="Primary",
+                api_key="provider-secret",
+                consumers=("codegen",),
+                model_ids=("gpt-5.4-mini",),
+                projections={"codegen": _projection()},
+                actor_user_id=actor_user_id,
+            )
+
+        async with pool.acquire() as conn:
+            connection_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM llm_vault_connections WHERE project_id = $1",
+                project_id,
+            )
+        assert connection_count == 0
+    finally:
+        await pool.close()
 
 
 @pytest.mark.asyncio

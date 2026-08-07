@@ -14,6 +14,7 @@ from app.graphs.experiment_design import ExperimentDesignAgent
 def _ctx(level: int = 4) -> AgentContext:
     return AgentContext(
         pool=None,
+        llm_runtime=object(),
         vector_store=None,
         audit=None,
         run_id="run-1",

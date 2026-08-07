@@ -51,14 +51,6 @@ import { RolloutFields } from './RolloutFields'
 import { RuleBuilder } from './RuleBuilder'
 import { VariantsEditor } from './VariantsEditor'
 
-const ADVANCED_FORM_FIELDS = new Set<keyof FlagFormValues>([
-  'rules',
-  'fallthrough',
-  'evaluation_mode',
-  'auto_disable',
-  'guardrails',
-])
-
 const WRITABLE_STATES = [
   { value: 'draft', label: 'Draft', hint: 'not served — safe to iterate' },
   { value: 'active', label: 'Active', hint: 'evaluating and serving traffic' },
@@ -157,18 +149,6 @@ function FlagEditor({ flagKey: key }: { flagKey: string | undefined }) {
     if (disclosure) disclosure.open = true
   }
 
-  const revealAdvancedValidationErrors = (
-    errors: typeof formState.errors,
-  ) => {
-    if (
-      Array.from(ADVANCED_FORM_FIELDS).some(
-        (field) => errors[field] !== undefined,
-      )
-    ) {
-      openAdvancedSettings()
-    }
-  }
-
   const confirmSubmit = async () => {
     if (!review) return
     try {
@@ -226,15 +206,7 @@ function FlagEditor({ flagKey: key }: { flagKey: string | undefined }) {
   const openSimulator = async () => {
     const valid = await form.trigger()
     if (!valid) {
-      const parsed = flagFormSchema.safeParse(form.getValues())
-      if (
-        !parsed.success &&
-        parsed.error.issues.some((issue) =>
-          ADVANCED_FORM_FIELDS.has(issue.path[0] as keyof FlagFormValues),
-        )
-      ) {
-        openAdvancedSettings()
-      }
+      openAdvancedSettings()
       toast.error('Fix validation errors before simulating')
       return
     }
@@ -303,7 +275,7 @@ function FlagEditor({ flagKey: key }: { flagKey: string | undefined }) {
               </Button>
               <Button
                 type="button"
-                onClick={handleSubmit(prepareReview, revealAdvancedValidationErrors)}
+                onClick={handleSubmit(prepareReview, openAdvancedSettings)}
               >
                 Review & save
               </Button>
@@ -325,7 +297,7 @@ function FlagEditor({ flagKey: key }: { flagKey: string | undefined }) {
 
         <form
           className="space-y-4"
-          onSubmit={handleSubmit(prepareReview, revealAdvancedValidationErrors)}
+          onSubmit={handleSubmit(prepareReview, openAdvancedSettings)}
           noValidate
         >
           <Section title="Identity">
@@ -448,14 +420,14 @@ function FlagEditor({ flagKey: key }: { flagKey: string | undefined }) {
               <div className="space-y-4">
                 <Section
                   title="Targeting"
-                  description="Set the default rollout first, then add optional first-match rules."
+                  description="Rules evaluate in order; the fallthrough rollout applies when none match."
                 >
                   <div className="space-y-5">
                     <div className="space-y-2">
                       <RolloutFields
                         pathPrefix="fallthrough.rollout"
-                        percentageLabel="Initial rollout %"
-                        bucketByLabel="Initial rollout bucket identity"
+                        percentageLabel="Fallthrough rollout %"
+                        bucketByLabel="Fallthrough rollout bucket identity"
                         percentageError={
                           formState.errors.fallthrough?.rollout?.percentage?.message
                         }
@@ -464,8 +436,8 @@ function FlagEditor({ flagKey: key }: { flagKey: string | undefined }) {
                         }
                       />
                       <p className="text-xs text-muted-foreground">
-                        Initial rollout applies when no rule matches, and therefore
-                        applies to everyone when this flag has no rules.
+                        The fallthrough rollout applies when no rule matches, including
+                        every evaluation when this flag has no rules.
                       </p>
                     </div>
                     <div className="border-t pt-4">

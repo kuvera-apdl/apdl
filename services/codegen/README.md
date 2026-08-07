@@ -281,10 +281,10 @@ openssl base64 -A -in path/to/github-app.private-key.pem
 
 Paste that output directly after `GITHUB_APP_PRIVATE_KEY_BASE64=` in the
 untracked `.env` file. Base64 is transport encoding, not encryption: restrict
-access to `.env` like the original PEM and never commit either one. This is a
-breaking configuration change; deployments that previously supplied an inline
-PEM or a PEM file path must encode the file and migrate to the single setting
-above.
+access to `.env` like the original PEM and never commit either one. The value
+must remain one unwrapped line of standard Base64; Codegen rejects wrapped,
+malformed, or non-UTF-8 values. Regenerate it with the command above if
+validation fails.
 
 When enabling the webhook, generate its signing secret independently:
 
@@ -445,6 +445,31 @@ a branch or pull request.
 deployment-level provider model or credential. Every request resolves the
 project's active editor and helper assignments and obtains one phase-bound
 credential from the local broker.
+
+The socket capability gates credential acquisition; it does not keep plaintext
+out of the worker. A successful acquire serializes one attempt-scoped provider
+key to the worker, where helper calls pass it to LiteLLM and edit calls place it
+in the Aider subprocess environment. `repr=False` suppresses ordinary model
+representations only and is not a serialization or log-redaction boundary.
+
+Containment depends on the publication stage. Production `tenant_draft_pr`
+workers use Docker `--network none` and an attested Unix-socket proxy whose
+allowlist includes model providers, GitHub, and package registries while denying
+direct, private, metadata, and non-proxy egress. Local `development_pr` workers
+use an explicitly unfiltered bridge and therefore do not provide that secret
+containment. Offline mode cannot create changesets, and trusted in-process
+execution is restricted to that non-publishing mode.
+
+The attempt ledger records worker-claimed latency and token counts. Codegen
+derives a claimed cost from the assignment's snapshotted rates, rounded to the
+nearest micro-dollar. The current proxy does not measure provider usage, so
+these fields are informational evidence only and must not drive billing,
+budgets, or policy enforcement.
+
+Each changeset broker admits at most eight active socket handlers and configures
+an eight-connection listen backlog. Overflow transports are closed before any
+request parsing. Teardown cancels admitted peer I/O immediately, then preserves
+the database terminalization barrier for any attempt that reached preparation.
 
 Build and validate the three runtime images, apply migrations, then start the
 tenant overlay:

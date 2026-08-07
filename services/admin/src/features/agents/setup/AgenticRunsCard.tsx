@@ -584,6 +584,15 @@ function AgentsSetupWizard({
                 </div>
               </dl>
             </div>
+            {firstActivation &&
+            setup.version === 0 &&
+            setup.caller_capabilities.management_authority === 'owner' ? (
+              <p className="rounded-md border p-3 text-xs text-muted-foreground">
+                First activation grants your project membership agents:run and
+                agents:manage. This one-time grant is not restored by later
+                reconfiguration if either role is removed.
+              </p>
+            ) : null}
             <p className="flex gap-2 rounded-md border bg-muted/30 p-3 text-xs text-muted-foreground">
               <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0" />
               Activation permits governed L1/L2 analysis only. It does not

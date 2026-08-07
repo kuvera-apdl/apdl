@@ -21,6 +21,7 @@ import asyncpg
 
 import app.graphs  # noqa: F401  ensures all agents are registered
 from app.framework import AgentContext, BaseAgent, CustomAgent, get_agent, is_registered
+from app.llm.runtime import LlmRuntime
 from app.memory.pgvector_store import PgVectorStore
 from app.safety.audit import AuditLogger
 from app.store.custom_agents import fetch_active_by_slugs
@@ -255,6 +256,7 @@ async def _resolve_agents(
 async def run_supervisor(
     pool: asyncpg.Pool,
     vector_store: PgVectorStore,
+    llm_runtime: LlmRuntime,
     run_id: str,
     project_id: str,
     analysis_types: list[str],
@@ -293,6 +295,7 @@ async def run_supervisor(
         await _run_owned_supervisor(
             pool=pool,
             vector_store=vector_store,
+            llm_runtime=llm_runtime,
             run_id=run_id,
             project_id=project_id,
             analysis_types=analysis_types,
@@ -316,6 +319,7 @@ async def run_supervisor(
 async def _run_owned_supervisor(
     pool: asyncpg.Pool,
     vector_store: PgVectorStore,
+    llm_runtime: LlmRuntime,
     run_id: str,
     project_id: str,
     analysis_types: list[str],
@@ -343,6 +347,7 @@ async def _run_owned_supervisor(
         pool=pool,
         vector_store=vector_store,
         audit=audit,
+        llm_runtime=llm_runtime,
         run_id=run_id,
         project_id=project_id,
         lease_owner_id=lease_owner_id,

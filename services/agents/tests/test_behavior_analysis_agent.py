@@ -31,6 +31,7 @@ class _NullVectorStore:
 def _ctx() -> Any:
     return AgentContext(
         pool=None,
+        llm_runtime=object(),
         project_id="demo",
         time_range_days=7,
         run_id="run-1",

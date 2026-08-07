@@ -26,7 +26,15 @@ plaintext over the private service network.
 
 Generate production tokens independently and generate the encryption key with
 `openssl rand -base64 32`. Do not reuse a workload token as the admin or
-projection token.
+projection token. Local `make setup` generates the encryption key and admin
+token once and preserves both on later setup runs; deployments must provision
+their own independent values.
+
+The separate `APDL_LLM_VAULT_POSTGRES_PASSWORD` migration setting must remain
+available on every PostgreSQL migration run, not only initial bootstrap. Use
+that same explicit password in the vault's `POSTGRES_URL`; otherwise the
+migrator skips login-password reconciliation and the service credential can
+drift from the database role.
 
 ## API boundaries
 
@@ -36,14 +44,19 @@ projection token.
 - Workload access: `POST /internal/v1/credential-access`. The request must name
   the consumer, exact credential ID/version, execution ID, and purpose.
 - Consumer projections: the vault calls the private Agents and Codegen
-  projection endpoints before opening its database transaction. Provider
-  discovery or either requested projection failure leaves all state unchanged.
+  projection endpoints only after a live project-management authority
+  preflight, then revalidates authority inside the persistence transaction.
+  Provider discovery or either requested projection failure leaves all state
+  unchanged.
 
-Migration `056_project_llm_credential_vault.sql` is intentionally breaking when
-legacy Agents or Codegen secret tables contain rows, because their ciphertext
-was produced with independent keys. Revoke or export and reconnect those
-credentials before upgrading. The migration removes the legacy secret tables;
-there is no dual-schema compatibility mode.
+Migration `056_project_llm_credential_vault.sql` is a fresh-install-only custody
+cutover. Any legacy Agents or Codegen credential row, including replaced or
+revoked history, blocks it because the old ciphertext and credential lineage
+cannot be rebound safely to the new empty vault. Revocation crypto-shreds the
+secret bytes but deliberately retains that history, so it is not a supported
+remediation. Initialize a fresh PostgreSQL database, apply the canonical
+migrations, and reconnect providers through the shared vault. There is no
+in-place conversion or dual-schema compatibility mode.
 
 ## Local development
 
@@ -70,6 +83,10 @@ make rotate-llm-vault-key ARGS='--operator operator@example.com'
 The command acquires both exclusive APDL maintenance barriers, authenticates
 every active ciphertext before writing, re-encrypts the full set in one
 transaction, verifies the result, and appends immutable per-credential audit
-rows. Update `LLM_VAULT_ENCRYPTION_KEY_BASE64` to the new value before
-restarting services. The old and new rotation keys are command-only variables;
-they are never passed to Agents, Codegen, or the normal vault service process.
+rows. CPython cannot zeroize the immutable strings returned by decryption.
+Rotation therefore scopes plaintext to one credential preparation call at a
+time, retains only encrypted plans, and decrypts each credential once with the
+old key plus once with the new key for verification. Update
+`LLM_VAULT_ENCRYPTION_KEY_BASE64` to the new value before restarting services.
+The old and new rotation keys are command-only variables; they are never passed
+to Agents, Codegen, or the normal vault service process.

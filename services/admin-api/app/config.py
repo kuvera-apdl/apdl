@@ -86,10 +86,12 @@ def _positive_float(name: str, default: str) -> float:
     return value
 
 
-def _secret(name: str, default: str) -> str:
-    value = os.getenv(name, default)
-    if len(value.encode("utf-8")) < 32:
-        raise ValueError(f"{name} must contain at least 32 bytes")
+def _secret(name: str, default: str | None = None) -> str:
+    value = os.getenv(name) if default is None else os.getenv(name, default)
+    if value is None:
+        raise ValueError(f"{name} is required")
+    if value != value.strip() or len(value.encode("utf-8")) < 32:
+        raise ValueError(f"{name} must contain at least 32 bytes and be normalized")
     return value
 
 
@@ -154,6 +156,9 @@ class Settings:
     login_global_rate_limit: int
     login_network_rate_limit: int
     login_device_rate_limit: int
+    invitation_global_rate_limit: int
+    invitation_network_rate_limit: int
+    invitation_token_rate_limit: int
     login_progressive_failure_threshold: int
     login_progressive_base_delay_seconds: int
     login_progressive_max_delay_seconds: int
@@ -186,10 +191,7 @@ class Settings:
             ),
             service_urls=service_urls,
             service_api_keys=_service_keys(),
-            llm_vault_admin_token=_secret(
-                "LLM_VAULT_ADMIN_TOKEN",
-                "local-llm-vault-admin-token-change-me",
-            ),
+            llm_vault_admin_token=_secret("LLM_VAULT_ADMIN_TOKEN"),
             allowed_origins=_json_origins(
                 os.getenv(
                     "APDL_ADMIN_ALLOWED_ORIGINS",
@@ -231,6 +233,15 @@ class Settings:
             ),
             login_device_rate_limit=_positive_int(
                 "APDL_ADMIN_LOGIN_DEVICE_RATE_LIMIT", "20"
+            ),
+            invitation_global_rate_limit=_positive_int(
+                "APDL_ADMIN_INVITATION_GLOBAL_RATE_LIMIT", "600"
+            ),
+            invitation_network_rate_limit=_positive_int(
+                "APDL_ADMIN_INVITATION_NETWORK_RATE_LIMIT", "30"
+            ),
+            invitation_token_rate_limit=_positive_int(
+                "APDL_ADMIN_INVITATION_TOKEN_RATE_LIMIT", "20"
             ),
             login_progressive_failure_threshold=_positive_int(
                 "APDL_ADMIN_LOGIN_PROGRESSIVE_FAILURE_THRESHOLD", "3"
@@ -276,6 +287,14 @@ class Settings:
             raise ValueError(
                 "APDL_ADMIN_LOGIN_GLOBAL_RATE_LIMIT must be at least "
                 "the network and device limits"
+            )
+        if settings.invitation_global_rate_limit < max(
+            settings.invitation_network_rate_limit,
+            settings.invitation_token_rate_limit,
+        ):
+            raise ValueError(
+                "APDL_ADMIN_INVITATION_GLOBAL_RATE_LIMIT must be at least "
+                "the network and token limits"
             )
         if (
             settings.cookie_secure

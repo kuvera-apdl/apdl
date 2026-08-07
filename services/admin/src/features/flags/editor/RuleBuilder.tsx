@@ -4,105 +4,61 @@
 import { ArrowDown, ArrowUp, Plus, Trash2 } from 'lucide-react'
 import { Controller, useFieldArray, useFormContext, type FieldPath } from 'react-hook-form'
 
-import type { ConditionOperator } from '@/api/types/flags'
-import { TagInput } from '@/components/shared/TagInput'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
-import { Select } from '@/components/ui/select'
 import {
   MAX_CONDITIONS_PER_RULE,
-  MAX_IDENTIFIER_LENGTH,
   MAX_RULES,
   MAX_STRING_LENGTH,
 } from '@/core/evaluator/targetingContract'
+import {
+  TargetingAttributesDatalist,
+  TargetingConditionFields,
+} from '@/features/targeting/TargetingConditionFields'
+import {
+  emptyTargetingCondition,
+  newTargetingRuleId,
+} from '@/features/targeting/editorModel'
 
 import {
-  EXISTENCE_OPERATORS,
-  LIST_OPERATORS,
-  NUMERIC_OPERATORS,
-  newRuleId,
+  type ConditionFormValues,
   type FlagFormValues,
 } from './formModel'
 import { RolloutFields } from './RolloutFields'
 
-const OPERATOR_GROUPS: { label: string; operators: ConditionOperator[] }[] = [
-  { label: 'Existence', operators: ['exists', 'not_exists'] },
-  { label: 'Equality', operators: ['equals', 'not_equals'] },
-  { label: 'String', operators: ['contains', 'not_contains', 'starts_with', 'ends_with'] },
-  { label: 'Numeric', operators: ['gt', 'gte', 'lt', 'lte'] },
-  { label: 'Collection', operators: ['in', 'not_in'] },
-]
-
-const COMMON_ATTRIBUTES = ['user_id', 'anonymous_id', 'plan', 'country', 'email', 'device', 'beta_opt_in']
-
 function ConditionRow({ rulePath, index, onRemove }: { rulePath: string; index: number; onRemove: () => void }) {
-  const { register, watch, control, getFieldState, formState } = useFormContext<FlagFormValues>()
+  const { control, getFieldState, formState } = useFormContext<FlagFormValues>()
   const base = `${rulePath}.conditions.${index}`
-  const operator = watch(`${base}.operator` as FieldPath<FlagFormValues>) as ConditionOperator
   const attributeError = getFieldState(`${base}.attribute` as FieldPath<FlagFormValues>, formState).error
   const valueError = getFieldState(`${base}.value` as FieldPath<FlagFormValues>, formState).error
   const valuesError = getFieldState(`${base}.values` as FieldPath<FlagFormValues>, formState).error
 
   return (
-    <div className="flex flex-wrap items-start gap-2">
-      <div className="w-44">
-        <Input
-          placeholder="attribute"
-          className="font-mono text-xs"
-          list="apdl-common-attributes"
-          maxLength={MAX_IDENTIFIER_LENGTH}
-          {...register(`${base}.attribute` as FieldPath<FlagFormValues>)}
-        />
-        {attributeError ? <p className="mt-1 text-xs text-destructive">{attributeError.message}</p> : null}
-      </div>
-      <Select
-        className="w-36"
-        aria-label="Operator"
-        {...register(`${base}.operator` as FieldPath<FlagFormValues>)}
-      >
-        {OPERATOR_GROUPS.map((group) => (
-          <optgroup key={group.label} label={group.label}>
-            {group.operators.map((op) => (
-              <option key={op} value={op}>
-                {op.replace(/_/g, ' ')}
-              </option>
-            ))}
-          </optgroup>
-        ))}
-      </Select>
-      <div className="min-w-44 flex-1">
-        {EXISTENCE_OPERATORS.has(operator) ? (
-          <p className="py-2 text-xs text-muted-foreground">no value — checks presence</p>
-        ) : LIST_OPERATORS.has(operator) ? (
-          <>
-            <Controller
-              control={control}
-              name={`${base}.values` as FieldPath<FlagFormValues>}
-              render={({ field }) => (
-                <TagInput
-                  value={((field.value as unknown[]) ?? []).map(String)}
-                  onChange={field.onChange}
-                  placeholder="add value, press Enter"
-                  aria-label="Condition values"
-                />
-              )}
-            />
-            {valuesError ? <p className="mt-1 text-xs text-destructive">{valuesError.message}</p> : null}
-            <p className="mt-1 text-xs text-muted-foreground">compared as exact scalar values</p>
-          </>
-        ) : (
-          <>
-            <Input
-              placeholder={NUMERIC_OPERATORS.has(operator) ? 'canonical decimal' : 'value'}
-              type="text"
-              maxLength={MAX_STRING_LENGTH}
-              {...register(`${base}.value` as FieldPath<FlagFormValues>)}
-            />
-            {valueError ? <p className="mt-1 text-xs text-destructive">{valueError.message}</p> : null}
-          </>
+    <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_10rem_minmax(0,1fr)_auto]">
+      <Controller
+        control={control}
+        name={base as FieldPath<FlagFormValues>}
+        render={({ field }) => (
+          <TargetingConditionFields
+            condition={field.value as ConditionFormValues}
+            onChange={field.onChange}
+            idPrefix={`flag-${base.replaceAll('.', '-')}`}
+            ariaLabels={{
+              attribute: 'Attribute',
+              operator: 'Operator',
+              value: 'Condition value',
+              valueType: 'Condition value type',
+              values: 'Condition values',
+            }}
+            errors={{
+              attribute: attributeError?.message,
+              value: valueError?.message,
+              values: valuesError?.message,
+            }}
+          />
         )}
-      </div>
+      />
       <Button type="button" variant="ghost" size="icon" onClick={onRemove} aria-label="Remove condition">
         <Trash2 />
       </Button>
@@ -158,7 +114,7 @@ function RuleCard({ index, total, onMove, onRemove }: { index: number; total: nu
             variant="outline"
             size="sm"
             disabled={conditions.fields.length >= MAX_CONDITIONS_PER_RULE}
-            onClick={() => conditions.append({ attribute: '', operator: 'equals', value: '', values: [] })}
+            onClick={() => conditions.append(emptyTargetingCondition())}
           >
             <Plus />
             Add condition
@@ -178,14 +134,10 @@ export function RuleBuilder() {
 
   return (
     <div className="space-y-3">
-      <datalist id="apdl-common-attributes">
-        {COMMON_ATTRIBUTES.map((attribute) => (
-          <option key={attribute} value={attribute} />
-        ))}
-      </datalist>
+      <TargetingAttributesDatalist />
       {fields.length === 0 ? (
         <p className="text-sm text-muted-foreground">
-          No targeting rules — Initial rollout applies to everyone.
+          No targeting rules — the fallthrough rollout applies to everyone.
         </p>
       ) : (
         fields.map((field, index) => (
@@ -205,7 +157,7 @@ export function RuleBuilder() {
         disabled={fields.length >= MAX_RULES}
         onClick={() =>
           append({
-            id: newRuleId(),
+            id: newTargetingRuleId(),
             name: '',
             conditions: [],
             rollout: { percentage: 100, bucket_by: 'user_id' },

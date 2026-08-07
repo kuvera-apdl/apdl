@@ -43,13 +43,24 @@ function configSummary(result: ServiceHealth): string {
   const sse = isRecord(ready.body.sse) ? ready.body.sse : null
   const postgres = typeof checks?.postgres === 'string' ? checks.postgres : 'unknown'
   const redis = typeof checks?.redis === 'string' ? checks.redis : 'unknown'
+  const additionalFailures = checks
+    ? Object.entries(checks).flatMap(([name, status]) => {
+        if (name === 'postgres' || name === 'redis' || status === 'ready') return []
+        return [`${name}: ${typeof status === 'string' ? status : 'unknown'}`]
+      })
+    : []
   const activeConnections =
     typeof sse?.active_connections === 'number' &&
     Number.isInteger(sse.active_connections) &&
     sse.active_connections >= 0
       ? String(sse.active_connections)
       : 'unknown'
-  return `pg: ${postgres} · redis: ${redis} · sse: ${activeConnections}`
+  return [
+    `pg: ${postgres}`,
+    `redis: ${redis}`,
+    `sse: ${activeConnections}`,
+    ...additionalFailures,
+  ].join(' · ')
 }
 
 function summaryLine(result: ServiceHealth): string {

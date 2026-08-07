@@ -100,6 +100,13 @@ def test_startup_requires_github_user_authorization_migration():
         "github_repository_authorization_candidates",
         "github_repository_authorization_candidates_immutable",
     ) in REQUIRED_TRIGGERS
+    for column in (
+        "claimed_latency_ms",
+        "claimed_input_tokens",
+        "claimed_output_tokens",
+        "claimed_cost_usd_micros",
+    ):
+        assert ("codegen_llm_attempts", column) in REQUIRED_COLUMNS
 
 
 @pytest.mark.asyncio
@@ -123,6 +130,18 @@ async def test_rejects_database_without_github_user_authorization_migration():
 async def test_rejects_incomplete_schema_at_startup():
     columns = REQUIRED_COLUMNS - {("github_repository_grants", "repository_id")}
     with pytest.raises(RuntimeError, match="github_repository_grants.repository_id"):
+        await assert_schema_ready(FakeConn(columns=columns))
+
+
+@pytest.mark.asyncio
+async def test_rejects_attempt_ledger_without_claimed_usage_contract():
+    columns = REQUIRED_COLUMNS - {
+        ("codegen_llm_attempts", "claimed_cost_usd_micros")
+    }
+    with pytest.raises(
+        RuntimeError,
+        match="codegen_llm_attempts.claimed_cost_usd_micros",
+    ):
         await assert_schema_ready(FakeConn(columns=columns))
 
 

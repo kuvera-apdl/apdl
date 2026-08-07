@@ -118,7 +118,7 @@ BEGIN
      AND membership.project_id = NEW.project_id
     WHERE account.user_id = NEW.owner_user_id
       AND account.active
-    FOR KEY SHARE OF account, membership;
+    FOR SHARE OF account, membership;
 
     IF NOT FOUND OR NOT ('members:manage' = ANY(owner_roles)) THEN
         RAISE EXCEPTION USING

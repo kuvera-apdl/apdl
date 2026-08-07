@@ -57,13 +57,21 @@ class ProjectionResponse(BaseModel):
     models: tuple[ProjectedModel, ...]
 
 
+def _constant_time_header_equal(candidate: str, expected: str) -> bool:
+    try:
+        candidate_bytes = candidate.encode("latin-1")
+    except UnicodeEncodeError:
+        return False
+    return secrets.compare_digest(candidate_bytes, expected.encode("utf-8"))
+
+
 def _authorize(authorization: str) -> None:
     expected = os.getenv("LLM_VAULT_PROJECTION_TOKEN", "")
     supplied = authorization.removeprefix("Bearer ")
     if (
         not authorization.startswith("Bearer ")
         or len(expected.encode("utf-8")) < 32
-        or not secrets.compare_digest(supplied, expected)
+        or not _constant_time_header_equal(supplied, expected)
     ):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

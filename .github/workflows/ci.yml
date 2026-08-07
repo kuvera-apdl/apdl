@@ -270,6 +270,7 @@ jobs:
           --health-retries 5
     env:
       APDL_AGENTS_LANE_TEST_POSTGRES_URL: postgresql://apdl:apdl_dev@localhost:5432/apdl
+      APDL_AGENTS_SETUP_TEST_POSTGRES_URL: postgresql://apdl:apdl_dev@localhost:5432/apdl
       APDL_RUNTIME_POSTGRES_PASSWORD: apdl_runtime_ci_test
       APDL_AGENTS_POSTGRES_PASSWORD: apdl_agents_ci_test
       APDL_LLM_VAULT_POSTGRES_PASSWORD: apdl_llm_vault_ci_test
@@ -326,10 +327,16 @@ jobs:
         working-directory: services/agents
       - run: .venv/bin/ruff check app/
         working-directory: services/agents
-      - run: .venv/bin/python -m pytest -q --ignore=tests/test_execution_lane_postgres.py
+      - run: >-
+          .venv/bin/python -m pytest -q
+          --ignore=tests/test_execution_lane_postgres.py
+          --ignore=tests/test_llm_setup_postgres.py
         working-directory: services/agents
-      - name: Run live PostgreSQL execution-lane race tests
-        run: .venv/bin/python -m pytest -q tests/test_execution_lane_postgres.py
+      - name: Run live PostgreSQL Agents invariant tests
+        run: >-
+          .venv/bin/python -m pytest -q
+          tests/test_execution_lane_postgres.py
+          tests/test_llm_setup_postgres.py
         working-directory: services/agents
 
   codegen-service:

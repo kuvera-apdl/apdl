@@ -89,6 +89,15 @@ class ProjectLlmVaultStore:
                 "agents:manage and credentials:manage roles"
             )
 
+    async def assert_create_authority(
+        self, *, project_id: str, actor_user_id: UUID
+    ) -> None:
+        """Reject unauthorized create requests before provider network egress."""
+        async with self._pool.acquire() as conn:
+            await self._assert_authority(
+                conn, project_id, actor_user_id, lock=False
+            )
+
     @staticmethod
     async def _assert_read_authority(
         conn: Any, project_id: str, actor_user_id: UUID

@@ -115,14 +115,14 @@ describe('FlagEditorPage — create', () => {
     expect(screen.getByText('Safety')).toBeVisible()
     expect(
       screen.getByText(
-        'Initial rollout applies when no rule matches, and therefore applies to everyone when this flag has no rules.',
+        'The fallthrough rollout applies when no rule matches, including every evaluation when this flag has no rules.',
       ),
     ).toBeVisible()
     expect(
-      screen.getByRole('spinbutton', { name: 'Initial rollout %' }),
+      screen.getByRole('spinbutton', { name: 'Fallthrough rollout %' }),
     ).toHaveValue(100)
     expect(
-      screen.getByRole('combobox', { name: 'Initial rollout bucket identity' }),
+      screen.getByRole('combobox', { name: 'Fallthrough rollout bucket identity' }),
     ).toHaveValue('user_id')
     expect(screen.getByRole('button', { name: 'Add rule' })).toBeVisible()
     expect(screen.getByRole('combobox', { name: 'Evaluation mode' })).toHaveValue(
@@ -198,6 +198,23 @@ describe('FlagEditorPage — create', () => {
     ).not.toBeInTheDocument()
   })
 
+  test('opens Advanced Settings for every failed review and simulation', async () => {
+    renderEditor('/flags/new')
+
+    const summary = await screen.findByText('Advanced Settings')
+    const disclosure = summary.closest('details')
+    expect(disclosure).not.toHaveAttribute('open')
+
+    await userEvent.click(screen.getByRole('button', { name: 'Review & save' }))
+    expect(disclosure).toHaveAttribute('open')
+
+    await userEvent.click(summary.closest('summary')!)
+    expect(disclosure).not.toHaveAttribute('open')
+
+    await userEvent.click(screen.getByRole('button', { name: 'Simulate' }))
+    expect(disclosure).toHaveAttribute('open')
+  })
+
   test('opens Advanced Settings for hidden targeting errors before review', async () => {
     renderEditor('/flags/new')
     await userEvent.type(await screen.findByPlaceholderText('checkout-cta'), 'invalid-rule')
@@ -233,7 +250,7 @@ describe('FlagEditorPage — create', () => {
     const disclosure = summary.closest('details')
     await userEvent.click(summary.closest('summary')!)
     await userEvent.selectOptions(
-      screen.getByRole('combobox', { name: 'Initial rollout bucket identity' }),
+      screen.getByRole('combobox', { name: 'Fallthrough rollout bucket identity' }),
       'custom',
     )
     await userEvent.click(summary.closest('summary')!)
@@ -324,7 +341,7 @@ describe('FlagEditorPage — edit & version conflict', () => {
     expect(disclosure).not.toHaveAttribute('open')
     await userEvent.click(summary.closest('summary')!)
     expect(
-      screen.getByRole('spinbutton', { name: 'Initial rollout %' }),
+      screen.getByRole('spinbutton', { name: 'Fallthrough rollout %' }),
     ).toHaveValue(10)
     await userEvent.click(summary.closest('summary')!)
     await userEvent.click(screen.getByRole('button', { name: 'Review & save' }))

@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { act, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
@@ -19,7 +19,12 @@ import {
   experimentUpdateSchema,
 } from '../../src/api/schemas/experiments'
 import { TooltipProvider } from '../../src/components/ui/tooltip'
-import { SUPPORTED_OPERATORS } from '../../src/core/evaluator/targetingContract'
+import {
+  MAX_CONDITIONS_PER_RULE,
+  MAX_MEMBERSHIP_VALUES,
+  MAX_RULES,
+  SUPPORTED_OPERATORS,
+} from '../../src/core/evaluator/targetingContract'
 import { WorkspaceProvider } from '../../src/core/workspace'
 import type { Workspace } from '../../src/core/workspace'
 import {
@@ -31,6 +36,12 @@ import {
   validateExperimentForm,
   type ExperimentFormValues,
 } from '../../src/features/experiments/ExperimentForm'
+import {
+  safeTargetingRulesToWire,
+  targetingRulesToWire,
+  type ExperimentTargetingConditionFormValue,
+  type ExperimentTargetingRuleFormValue,
+} from '../../src/features/experiments/ExperimentTargetingRules'
 import { ExperimentListPage } from '../../src/features/experiments/ExperimentListPage'
 import { ExperimentDetailPage } from '../../src/features/experiments/ExperimentDetailPage'
 import { makeWorkspace, seedWorkspace } from '../helpers/fixtures'
@@ -443,6 +454,168 @@ describe('experiment form model', () => {
     expect(validateExperimentForm(invalid).targeting).toBeTruthy()
   })
 
+  test('preserves precise targeting validation paths and limit-specific messages', () => {
+    const validCondition = (
+      uiId: string,
+      patch: Partial<ExperimentTargetingConditionFormValue> = {},
+    ): ExperimentTargetingConditionFormValue => ({
+      uiId,
+      attribute: 'plan',
+      operator: 'equals',
+      valueType: 'string',
+      value: 'pro',
+      values: [],
+      ...patch,
+    })
+    const validRule = (
+      index: number,
+      conditions: ExperimentTargetingConditionFormValue[] = [
+        validCondition(`condition-${index}`),
+      ],
+    ): ExperimentTargetingRuleFormValue => ({
+      id: `rule-${index}`,
+      name: '',
+      conditions,
+    })
+
+    const cases: Array<{
+      rules: ExperimentTargetingRuleFormValue[]
+      path: PropertyKey[]
+      message: string
+    }> = [
+      {
+        rules: Array.from({ length: MAX_RULES + 1 }, (_, index) => validRule(index)),
+        path: [],
+        message: `At most ${MAX_RULES} targeting rules`,
+      },
+      {
+        rules: [
+          validRule(
+            0,
+            Array.from({ length: MAX_CONDITIONS_PER_RULE + 1 }, (_, index) =>
+              validCondition(`condition-${index}`),
+            ),
+          ),
+        ],
+        path: [0, 'conditions'],
+        message: `At most ${MAX_CONDITIONS_PER_RULE} conditions per rule`,
+      },
+      {
+        rules: [
+          validRule(0, [
+            validCondition('condition-membership-limit', {
+              operator: 'in',
+              values: Array.from({ length: MAX_MEMBERSHIP_VALUES + 1 }, (_, index) => index),
+            }),
+          ]),
+        ],
+        path: [0, 'conditions', 0, 'values'],
+        message: `At most ${MAX_MEMBERSHIP_VALUES} membership values`,
+      },
+      {
+        rules: [
+          validRule(0, [
+            validCondition('condition-membership-empty', {
+              operator: 'in',
+              values: [],
+            }),
+          ]),
+        ],
+        path: [0, 'conditions', 0, 'values'],
+        message: `Add 1–${MAX_MEMBERSHIP_VALUES} scalar values`,
+      },
+      {
+        rules: [validRule(0, [validCondition('condition-attribute', { attribute: ' ' })])],
+        path: [0, 'conditions', 0, 'attribute'],
+        message: 'Attribute is required',
+      },
+      {
+        rules: [
+          validRule(0, [
+            validCondition('condition-numeric-operator', {
+              operator: 'gte',
+              valueType: 'number',
+              value: 'not-a-number',
+            }),
+          ]),
+        ],
+        path: [0, 'conditions', 0, 'value'],
+        message: 'Use a finite number or canonical decimal',
+      },
+      {
+        rules: [
+          validRule(0, [
+            validCondition('condition-numeric-equality', {
+              valueType: 'number',
+              value: 'not-a-number',
+            }),
+          ]),
+        ],
+        path: [0, 'conditions', 0, 'value'],
+        message: 'Use a finite number or canonical decimal',
+      },
+      {
+        rules: [
+          validRule(0, [
+            validCondition('condition-boolean', {
+              valueType: 'boolean',
+              value: 'true',
+            }),
+          ]),
+        ],
+        path: [0, 'conditions', 0, 'value'],
+        message: 'Expected a boolean value',
+      },
+    ]
+
+    for (const testCase of cases) {
+      const result = safeTargetingRulesToWire(testCase.rules)
+      expect(result.success).toBe(false)
+      if (!result.success) {
+        expect(result.error.issues).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ path: testCase.path, message: testCase.message }),
+          ]),
+        )
+      }
+    }
+  })
+
+  test('rejects an invalid numeric draft before a wire payload can be serialized', () => {
+    const invalidRules: ExperimentTargetingRuleFormValue[] = [
+      {
+        id: 'rule-invalid',
+        name: '',
+        conditions: [
+          {
+            uiId: 'condition-invalid',
+            attribute: 'age',
+            operator: 'gte',
+            valueType: 'number',
+            value: 'not-a-number',
+            values: [],
+          },
+        ],
+      },
+    ]
+
+    expect(() => targetingRulesToWire(invalidRules)).toThrow(
+      'Use a finite number or canonical decimal',
+    )
+    expect(() => JSON.stringify(targetingRulesToWire(invalidRules))).toThrow(
+      'Use a finite number or canonical decimal',
+    )
+
+    const errors = validateExperimentForm({
+      ...emptyExperimentValues(),
+      key: 'experiment-1',
+      targetingRules: invalidRules,
+    })
+    expect(
+      errors.targeting?.rules['rule-invalid']?.conditions['condition-invalid']?.value,
+    ).toBe('Use a finite number or canonical decimal')
+  })
+
   test('buildCreate projects the structured form to the canonical payload', () => {
     const values: ExperimentFormValues = {
       key: ' exp-1 ',
@@ -451,7 +624,7 @@ describe('experiment form model', () => {
       description: 'd',
       bucket_by: 'anonymous_id',
       traffic_percentage: 50,
-      start_date: '2026-06-01',
+      start_date: '2026-06-01T14:30:45',
       end_date: '',
       variants: [
         { key: 'control', weight: 1, description: 'Current' },
@@ -475,7 +648,7 @@ describe('experiment form model', () => {
       description: 'd',
       bucket_by: 'anonymous_id',
       traffic_percentage: 50,
-      start_date: '2026-06-01T00:00:00Z',
+      start_date: '2026-06-01T14:30:45Z',
       end_date: null,
       variants: [
         { key: 'control', weight: 1, description: 'Current' },
@@ -489,11 +662,18 @@ describe('experiment form model', () => {
 
   })
 
-  test('entryToFormValues projects aware timestamps to native date input values', () => {
+  test('entryToFormValues projects aware timestamps to precise UTC input values', () => {
     const values = entryToFormValues(experimentEntrySchema.parse(EXPERIMENT))
+    const nonMidnight = entryToFormValues(
+      experimentEntrySchema.parse({
+        ...EXPERIMENT,
+        start_date: '2026-06-01T14:30:45Z',
+      }),
+    )
 
-    expect(values.start_date).toBe('2026-06-01')
-    expect(values.end_date).toBe('2026-07-01')
+    expect(values.start_date).toBe('2026-06-01T00:00:00')
+    expect(values.end_date).toBe('2026-07-01T00:00:00')
+    expect(nonMidnight.start_date).toBe('2026-06-01T14:30:45')
   })
 
   test('buildUpdate diffs drafts and never sends frozen fields after draft', () => {
@@ -509,7 +689,7 @@ describe('experiment form model', () => {
     draftValues.description = 'Changed'
     draftValues.bucket_by = 'user_id'
     draftValues.default_variant = 'treatment'
-    draftValues.start_date = '2026-06-01'
+    draftValues.start_date = '2026-06-01T09:15:30'
     draftValues.traffic_percentage = 50
     draftValues.targetingRules = [
       {
@@ -539,7 +719,7 @@ describe('experiment form model', () => {
           conditions: [{ attribute: 'plan', operator: 'equals', value: 'pro' }],
         },
       ],
-      start_date: '2026-06-01T00:00:00Z',
+      start_date: '2026-06-01T09:15:30Z',
     })
 
     const running = experimentEntrySchema.parse({
@@ -549,8 +729,8 @@ describe('experiment form model', () => {
     })
     const stoppedValues = entryToFormValues(running)
     stoppedValues.status = 'stopped'
-    stoppedValues.start_date = '2026-06-02'
-    stoppedValues.end_date = '2026-07-02'
+    stoppedValues.start_date = '2026-06-02T00:00:00'
+    stoppedValues.end_date = '2026-07-02T00:00:00'
     stoppedValues.variants[1]!.weight = 2
     stoppedValues.default_variant = 'treatment'
     stoppedValues.metricEvent = 'checkout_completed'
@@ -580,6 +760,25 @@ describe('experiment form model', () => {
     values.description = 'Changed'
 
     expect(buildUpdate(values, draft)).toEqual({ version: 2, description: 'Changed' })
+  })
+
+  test('normalizes offset timestamps to UTC and only sends an edited instant', () => {
+    const draft = experimentEntrySchema.parse({
+      ...DRAFT_EXPERIMENT,
+      start_date: '2026-06-01T14:30:45-07:00',
+      end_date: '2026-06-15T09:05:06-07:00',
+    })
+    const values = entryToFormValues(draft)
+
+    expect(values.start_date).toBe('2026-06-01T21:30:45')
+    expect(values.end_date).toBe('2026-06-15T16:05:06')
+    expect(buildUpdate(values, draft)).toEqual({ version: 2 })
+
+    values.start_date = '2026-06-01T22:45:30'
+    expect(buildUpdate(values, draft)).toEqual({
+      version: 2,
+      start_date: '2026-06-01T22:45:30Z',
+    })
   })
 
   test('validateExperimentForm catches duplicate keys and an out-of-set default', () => {
@@ -627,17 +826,33 @@ describe('experiment form model', () => {
     expect(
       validateExperimentForm({
         ...base,
-        start_date: '2026-01-01',
-        end_date: '2026-04-01',
+        start_date: '2026-01-01T14:30:00',
+        end_date: '2026-04-01T14:30:00',
       }).dates,
     ).toBeUndefined()
     expect(
       validateExperimentForm({
         ...base,
-        start_date: '2026-01-01',
-        end_date: '2026-04-02',
+        start_date: '2026-01-01T14:30:00',
+        end_date: '2026-04-01T14:30:01',
       }).dates,
     ).toBe('Experiment duration must not exceed 90 days')
+  })
+
+  test('validateExperimentForm requires a real UTC datetime-local value with seconds', () => {
+    const base = emptyExperimentValues()
+
+    for (const start_date of [
+      '2026-06-01',
+      '2026-06-01T14:30',
+      '2026-02-30T14:30:00',
+      '2026-06-01T24:00:00',
+      '2026-06-01T14:30:00Z',
+    ]) {
+      expect(validateExperimentForm({ ...base, start_date }).dates).toBe(
+        'Use YYYY-MM-DDTHH:mm:ss in UTC',
+      )
+    }
   })
 
   test('validateExperimentForm rejects path-unsafe experiment and flag keys', () => {
@@ -673,18 +888,18 @@ describe('ExperimentForm layout', () => {
 
     const headings = within(screen.getByTestId('variant-column-headings'))
     expect(headings.getByText('Key')).toBeInTheDocument()
-    expect(headings.getByText('User proportion')).toBeInTheDocument()
+    expect(headings.getByText('Relative Weight')).toBeInTheDocument()
     expect(headings.getByText('Comment')).toBeInTheDocument()
 
     expect(screen.getByRole('textbox', { name: 'Key for variant 1' })).toHaveValue('control')
-    expect(screen.getByRole('spinbutton', { name: 'User proportion for variant 1' })).toHaveValue(1)
+    expect(screen.getByRole('spinbutton', { name: 'Relative Weight for variant 1' })).toHaveValue(1)
     expect(screen.getByRole('textbox', { name: 'Comment for variant 1' })).toHaveValue('')
     expect(screen.getByRole('button', { name: 'Remove variant 1' })).toBeDisabled()
 
     await userEvent.click(screen.getByRole('button', { name: 'Add variant' }))
 
     expect(screen.getByRole('textbox', { name: 'Key for variant 3' })).toBeVisible()
-    expect(screen.getByRole('spinbutton', { name: 'User proportion for variant 3' })).toHaveValue(1)
+    expect(screen.getByRole('spinbutton', { name: 'Relative Weight for variant 3' })).toHaveValue(1)
     expect(screen.getByRole('textbox', { name: 'Comment for variant 3' })).toHaveValue('')
     expect(screen.getByRole('button', { name: 'Remove variant 3' })).toBeEnabled()
 
@@ -756,6 +971,10 @@ describe('ExperimentForm layout', () => {
     expect(
       within(disclosure!).queryByRole('spinbutton', { name: 'Traffic percentage' }),
     ).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Start (UTC)')).toHaveAttribute('type', 'datetime-local')
+    expect(screen.getByLabelText('Start (UTC)')).toHaveAttribute('step', '1')
+    expect(screen.getByLabelText('End (UTC)')).toHaveAttribute('type', 'datetime-local')
+    expect(screen.getByText('Times are shown and saved in UTC.')).toBeVisible()
   })
 
   test('keeps edit controls visible when collapsed and preserves lifecycle locks', async () => {
@@ -915,6 +1134,84 @@ describe('ExperimentForm layout', () => {
     ).toBeVisible()
     expect(onSubmit).not.toHaveBeenCalled()
   })
+
+  test('places a targeting validation error beside the offending condition value', async () => {
+    const onSubmit = vi.fn()
+    render(
+      <ExperimentForm
+        values={{
+          ...emptyExperimentValues(),
+          key: 'checkout-test',
+          targetingRules: [
+            {
+              id: 'rule-targeting',
+              name: '',
+              conditions: [
+                {
+                  uiId: 'condition-valid',
+                  attribute: 'age',
+                  operator: 'gte',
+                  valueType: 'number',
+                  value: '18',
+                  values: [],
+                },
+                {
+                  uiId: 'condition-invalid',
+                  attribute: 'age',
+                  operator: 'gte',
+                  valueType: 'number',
+                  value: 'not-a-number',
+                  values: [],
+                },
+              ],
+            },
+          ],
+        }}
+        onChange={vi.fn()}
+        isCreate
+        onSubmit={onSubmit}
+        submitting={false}
+      />,
+    )
+
+    await userEvent.click(screen.getByRole('button', { name: 'Create experiment' }))
+
+    const invalidInput = screen.getByRole('textbox', {
+      name: 'Targeting rule 1 condition 2 value',
+    })
+    const validInput = screen.getByRole('textbox', {
+      name: 'Targeting rule 1 condition 1 value',
+    })
+    const error = screen.getByText('Use a finite number or canonical decimal')
+
+    expect(invalidInput).toHaveAttribute('aria-invalid', 'true')
+    expect(invalidInput.parentElement?.parentElement).toContainElement(error)
+    expect(validInput.parentElement?.parentElement).not.toContainElement(error)
+    expect(onSubmit).not.toHaveBeenCalled()
+  })
+
+  test('normalizes the browser minute form to the strict seconds form state', () => {
+    const values = { ...emptyExperimentValues(), key: 'checkout-test' }
+    const onChange = vi.fn()
+    render(
+      <ExperimentForm
+        values={values}
+        onChange={onChange}
+        isCreate
+        onSubmit={vi.fn()}
+        submitting={false}
+      />,
+    )
+
+    fireEvent.change(screen.getByLabelText('Start (UTC)'), {
+      target: { value: '2026-06-01T14:30' },
+    })
+
+    expect(onChange).toHaveBeenCalledWith({
+      ...values,
+      start_date: '2026-06-01T14:30:00',
+    })
+  })
 })
 
 describe('ExperimentListPage', () => {
@@ -1059,10 +1356,12 @@ describe('ExperimentDetailPage', () => {
     renderDetail()
 
     await screen.findByDisplayValue('CTA experiment')
-    expect(screen.getByLabelText('Start date')).toHaveAttribute('type', 'date')
-    expect(screen.getByLabelText('Start date')).toHaveValue('2026-06-01')
-    expect(screen.getByLabelText('End date')).toHaveAttribute('type', 'date')
-    expect(screen.getByLabelText('End date')).toHaveValue('2026-07-01')
+    expect(screen.getByLabelText('Start (UTC)')).toHaveAttribute('type', 'datetime-local')
+    // datetime-local normalizes a zero-seconds DOM value to its shortest form;
+    // the controlled form state restores :00 in the change handler.
+    expect(screen.getByLabelText('Start (UTC)')).toHaveValue('2026-06-01T00:00')
+    expect(screen.getByLabelText('End (UTC)')).toHaveAttribute('type', 'datetime-local')
+    expect(screen.getByLabelText('End (UTC)')).toHaveValue('2026-07-01T00:00')
     expect(screen.getByRole('spinbutton', { name: 'Traffic percentage' })).toBeDisabled()
     expect(screen.getByRole('combobox', { name: 'Bucketing identity' })).toBeDisabled()
     expect(screen.getByRole('combobox', { name: 'Bucketing identity' })).toHaveValue(

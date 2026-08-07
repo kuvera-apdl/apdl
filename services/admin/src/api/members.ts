@@ -89,22 +89,50 @@ export const projectMemberSchema = z
   })
   .strict()
 
-export const pendingInvitationSchema = z
-  .object({
-    invitation_id: uuidSchema,
-    email: z.string().email(),
-    roles: humanRoleListSchema,
-    inviter_email: z.string().email(),
-    expires_at: z.string().datetime({ offset: true }),
-    created_at: z.string().datetime({ offset: true }),
-  })
-  .strict()
+const invitationBlockedReasonSchema = z.enum([
+  'inviter_inactive',
+  'inviter_not_project_member',
+  'inviter_lacks_members_manage',
+  'roles_exceed_inviter_authority',
+  'members_manage_requires_owner',
+])
 
-export const projectInvitationRevealSchema = pendingInvitationSchema
-  .extend({
+const pendingInvitationFields = {
+  invitation_id: uuidSchema,
+  email: z.string().email(),
+  roles: humanRoleListSchema,
+  inviter_email: z.string().email(),
+  status: z.enum(['valid', 'blocked']),
+  blocked_reason: invitationBlockedReasonSchema.nullable(),
+  expires_at: z.string().datetime({ offset: true }),
+  created_at: z.string().datetime({ offset: true }),
+}
+
+function validateInvitationStatus(
+  invitation: { status: 'valid' | 'blocked'; blocked_reason: string | null },
+  context: z.RefinementCtx,
+) {
+  if ((invitation.status === 'valid') !== (invitation.blocked_reason === null)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['blocked_reason'],
+      message: 'blocked_reason must be null exactly when status is valid',
+    })
+  }
+}
+
+export const pendingInvitationSchema = z
+  .object(pendingInvitationFields)
+  .strict()
+  .superRefine(validateInvitationStatus)
+
+export const projectInvitationRevealSchema = z
+  .object({
+    ...pendingInvitationFields,
     invitation_url: z.string().url(),
   })
   .strict()
+  .superRefine(validateInvitationStatus)
 
 export const projectMembersSchema = z
   .object({
@@ -132,6 +160,7 @@ export const membershipAuditEntrySchema = z
       'invitation_revoke',
       'invitation_accept',
       'roles_replace',
+      'activation_grant',
       'member_remove',
     ]),
     actor_user_id: uuidSchema,
@@ -144,8 +173,6 @@ export const membershipAuditEntrySchema = z
     created_at: z.string().datetime({ offset: true }),
   })
   .strict()
-
-export const membershipAuditListSchema = z.array(membershipAuditEntrySchema)
 
 export const ownershipAuditEntrySchema = z
   .object({
@@ -169,7 +196,26 @@ export const ownershipAuditEntrySchema = z
     }
   })
 
-export const ownershipAuditListSchema = z.array(ownershipAuditEntrySchema)
+export const auditCursorSchema = z
+  .object({
+    created_at: z.string().datetime({ offset: true }),
+    audit_id: uuidSchema,
+  })
+  .strict()
+
+export const membershipAuditPageSchema = z
+  .object({
+    entries: z.array(membershipAuditEntrySchema),
+    next_cursor: auditCursorSchema.nullable(),
+  })
+  .strict()
+
+export const ownershipAuditPageSchema = z
+  .object({
+    entries: z.array(ownershipAuditEntrySchema),
+    next_cursor: auditCursorSchema.nullable(),
+  })
+  .strict()
 
 export const invitationCreateRequestSchema = z
   .object({
@@ -182,6 +228,13 @@ export const memberRolesReplaceRequestSchema = z
   .object({ roles: humanRoleListSchema })
   .strict()
 
+export const ownershipTransferRequestSchema = z
+  .object({
+    target_user_id: uuidSchema,
+    reason: z.string().trim().min(1).max(2000).regex(/^[^\r\n]+$/).optional(),
+  })
+  .strict()
+
 export type ProjectAuthorization = z.infer<typeof projectAuthorizationSchema>
 export type ProjectMember = z.infer<typeof projectMemberSchema>
 export type PendingInvitation = z.infer<typeof pendingInvitationSchema>
@@ -190,9 +243,21 @@ export type ProjectMembers = z.infer<typeof projectMembersSchema>
 export type InvitationInspection = z.infer<typeof invitationInspectionSchema>
 export type MembershipAuditEntry = z.infer<typeof membershipAuditEntrySchema>
 export type OwnershipAuditEntry = z.infer<typeof ownershipAuditEntrySchema>
+export type AuditCursor = z.infer<typeof auditCursorSchema>
+export type MembershipAuditPage = z.infer<typeof membershipAuditPageSchema>
+export type OwnershipAuditPage = z.infer<typeof ownershipAuditPageSchema>
 
 function projectPath(projectId: string): string {
   return `/api/projects/${encodeURIComponent(projectId)}`
+}
+
+function auditPath(path: string, cursor: AuditCursor | null): string {
+  const params = new URLSearchParams({ limit: '50' })
+  if (cursor) {
+    params.set('before_created_at', cursor.created_at)
+    params.set('before_audit_id', cursor.audit_id)
+  }
+  return `${path}?${params.toString()}`
 }
 
 export function getProjectAuthorization(
@@ -263,31 +328,38 @@ export function removeProjectMember(projectId: string, memberUserId: string): Pr
 export function transferProjectOwnership(
   projectId: string,
   targetUserId: string,
+  reason?: string,
 ): Promise<ProjectAuthorization> {
+  const body = ownershipTransferRequestSchema.parse({
+    target_user_id: targetUserId,
+    ...(reason === undefined ? {} : { reason }),
+  })
   return request(adminConnection, `${projectPath(projectId)}/ownership/transfer`, {
     method: 'POST',
-    body: { target_user_id: uuidSchema.parse(targetUserId) },
+    body,
     schema: projectAuthorizationSchema,
   })
 }
 
 export function listMembershipAudit(
   projectId: string,
+  cursor: AuditCursor | null = null,
   signal?: AbortSignal,
-): Promise<MembershipAuditEntry[]> {
-  return request(adminConnection, `${projectPath(projectId)}/members/audit`, {
+): Promise<MembershipAuditPage> {
+  return request(adminConnection, auditPath(`${projectPath(projectId)}/members/audit`, cursor), {
     signal,
-    schema: membershipAuditListSchema,
+    schema: membershipAuditPageSchema,
   })
 }
 
 export function listOwnershipAudit(
   projectId: string,
+  cursor: AuditCursor | null = null,
   signal?: AbortSignal,
-): Promise<OwnershipAuditEntry[]> {
-  return request(adminConnection, `${projectPath(projectId)}/ownership/audit`, {
+): Promise<OwnershipAuditPage> {
+  return request(adminConnection, auditPath(`${projectPath(projectId)}/ownership/audit`, cursor), {
     signal,
-    schema: ownershipAuditListSchema,
+    schema: ownershipAuditPageSchema,
   })
 }
 

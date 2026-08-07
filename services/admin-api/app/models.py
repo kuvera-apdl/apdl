@@ -5,7 +5,7 @@ import re
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 EMAIL_PATTERN = r"^[^\s@]+@[^\s@]+\.[^\s@]+$"
 PROJECT_ID_PATTERN = r"^[A-Za-z0-9]{1,64}$"
@@ -39,7 +39,15 @@ MembershipAuditAction = Literal[
     "invitation_revoke",
     "invitation_accept",
     "roles_replace",
+    "activation_grant",
     "member_remove",
+]
+InvitationBlockedReason = Literal[
+    "inviter_inactive",
+    "inviter_not_project_member",
+    "inviter_lacks_members_manage",
+    "roles_exceed_inviter_authority",
+    "members_manage_requires_owner",
 ]
 ExecutionAuthorizationSource = Literal[
     "operator_provisioned", "self_registered_override"
@@ -160,10 +168,64 @@ class ProjectAuthorizationSummary(BaseModel):
     execution_authorization: ExecutionAuthorizationSummary
 
 
+def _require_timezone(value: datetime | None, *, field_name: str) -> None:
+    if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+        raise ValueError(f"{field_name} must include a timezone offset")
+
+
+class AuditCursor(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    created_at: datetime
+    audit_id: UUID
+
+    @field_validator("created_at")
+    @classmethod
+    def validate_created_at(cls, value: datetime) -> datetime:
+        _require_timezone(value, field_name="created_at")
+        return value
+
+
+class AuditPageQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    limit: int = Field(default=50, ge=1, le=200)
+    before_created_at: datetime | None = None
+    before_audit_id: UUID | None = None
+
+    @field_validator("before_created_at")
+    @classmethod
+    def validate_before_created_at(
+        cls,
+        value: datetime | None,
+    ) -> datetime | None:
+        _require_timezone(value, field_name="before_created_at")
+        return value
+
+    @model_validator(mode="after")
+    def validate_cursor_pair(self) -> "AuditPageQuery":
+        if (self.before_created_at is None) != (self.before_audit_id is None):
+            raise ValueError(
+                "before_created_at and before_audit_id must be provided together"
+            )
+        return self
+
+
 class OwnershipTransferRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     target_user_id: UUID
+    reason: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=2000,
+        pattern=r"^[^\r\n]+$",
+    )
+
+    @field_validator("reason", mode="before")
+    @classmethod
+    def normalize_reason(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
 
 
 class OwnershipAuditEntry(BaseModel):
@@ -190,6 +252,13 @@ class OwnershipAuditEntry(BaseModel):
         ):
             raise ValueError("previous owner ID and email must be present together")
         return self
+
+
+class OwnershipAuditPage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    entries: list[OwnershipAuditEntry]
+    next_cursor: AuditCursor | None
 
 
 def _roles_are_canonical(roles: list[HumanRole]) -> bool:
@@ -252,6 +321,8 @@ class PendingProjectInvitation(BaseModel):
     email: str = Field(pattern=EMAIL_PATTERN, max_length=320)
     roles: list[HumanRole] = Field(min_length=1, max_length=11)
     inviter_email: str = Field(pattern=EMAIL_PATTERN, max_length=320)
+    status: Literal["valid", "blocked"]
+    blocked_reason: InvitationBlockedReason | None
     expires_at: datetime
     created_at: datetime
 
@@ -259,6 +330,10 @@ class PendingProjectInvitation(BaseModel):
     def validate_roles(self) -> "PendingProjectInvitation":
         if not _roles_are_canonical(self.roles):
             raise ValueError("roles must be unique and use canonical order")
+        if (self.status == "valid") != (self.blocked_reason is None):
+            raise ValueError(
+                "blocked_reason must be null exactly when status is valid"
+            )
         return self
 
 
@@ -310,6 +385,13 @@ class MembershipAuditEntry(BaseModel):
             if roles is not None and not _roles_are_canonical(roles):
                 raise ValueError("role snapshots must use canonical order")
         return self
+
+
+class MembershipAuditPage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    entries: list[MembershipAuditEntry]
+    next_cursor: AuditCursor | None
 
 
 class CredentialCreateRequest(BaseModel):

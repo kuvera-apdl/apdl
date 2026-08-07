@@ -176,12 +176,14 @@ async def test_repeated_poll_does_not_duplicate_local_inflight_run(monkeypatch) 
         await release.wait()
 
     monkeypatch.setattr(run_dispatcher, "run_supervisor", fake_supervisor)
-    dispatcher = run_dispatcher.RunDispatcher(pool, object())
+    llm_runtime = object()
+    dispatcher = run_dispatcher.RunDispatcher(pool, object(), llm_runtime)
 
     assert await dispatcher.poll_once() == ("run-1",)
     await asyncio.sleep(0)
     assert await dispatcher.poll_once() == ()
     assert len(calls) == 1
+    assert calls[0]["llm_runtime"] is llm_runtime
     assert dispatcher.inflight_run_ids == ("run-1",)
 
     release.set()

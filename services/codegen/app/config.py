@@ -76,11 +76,19 @@ def github_app_id() -> str:
 def github_app_private_key() -> str:
     """Decode the canonical single-line GitHub App PEM setting.
 
-    The value must be standard RFC 4648 Base64 containing non-empty UTF-8 text.
-    Invalid input fails closed and is diagnosed without logging key material.
+    The value must be one unwrapped line of standard RFC 4648 Base64 containing
+    non-empty UTF-8 text. Invalid input fails closed and is diagnosed without
+    logging key material.
     """
     encoded = os.getenv(_GITHUB_APP_KEY_BASE64_SETTING, "")
     if not encoded:
+        return ""
+    if any(character.isspace() for character in encoded):
+        logger.warning(
+            "%s must be a single unwrapped Base64 line; generate it with "
+            "`openssl base64 -A -in path/to/github-app.private-key.pem`",
+            _GITHUB_APP_KEY_BASE64_SETTING,
+        )
         return ""
     try:
         encoded_bytes = encoded.encode("ascii")
