@@ -125,7 +125,7 @@ cmd_setup() {
         ok ".env already exists"
     fi
     python3 "$ROOT_DIR/scripts/llm_vault_key.py" ensure "$ROOT_DIR/.env"
-    ok "Local LLM vault encryption key is provisioned"
+    ok "Local LLM vault encryption key and admin token are provisioned"
 
     setup_python_package "Ingestion Service" "$ROOT_DIR/services/ingestion"
     setup_python_package "Config Service"    "$ROOT_DIR/services/config"

@@ -204,7 +204,7 @@ services:
     environment:
       POSTGRES_URL: postgresql://apdl_llm_vault:${APDL_LLM_VAULT_POSTGRES_PASSWORD:-apdl_llm_vault_dev}@postgres:5432/apdl
       LLM_VAULT_ENCRYPTION_KEY_BASE64: ${LLM_VAULT_ENCRYPTION_KEY_BASE64:-}
-      LLM_VAULT_ADMIN_TOKEN: ${LLM_VAULT_ADMIN_TOKEN:-local-llm-vault-admin-token-change-me}
+      LLM_VAULT_ADMIN_TOKEN: ${LLM_VAULT_ADMIN_TOKEN:-}
       LLM_VAULT_AGENTS_TOKEN: ${LLM_VAULT_AGENTS_TOKEN:-local-llm-vault-agents-token-change-me}
       LLM_VAULT_CODEGEN_TOKEN: ${LLM_VAULT_CODEGEN_TOKEN:-local-llm-vault-codegen-token-change-me}
       LLM_VAULT_PROJECTION_TOKEN: ${LLM_VAULT_PROJECTION_TOKEN:-local-llm-vault-projection-token-change-me}
@@ -413,7 +413,7 @@ services:
       AGENTS_SERVICE_URL: http://agents:8083
       CODEGEN_SERVICE_URL: http://codegen:8084
       LLM_VAULT_URL: http://llm-vault:8086
-      LLM_VAULT_ADMIN_TOKEN: ${LLM_VAULT_ADMIN_TOKEN:-local-llm-vault-admin-token-change-me}
+      LLM_VAULT_ADMIN_TOKEN: ${LLM_VAULT_ADMIN_TOKEN:-}
       APDL_SERVICE_API_KEYS: '${APDL_SERVICE_API_KEYS:-{}}'
       APDL_ADMIN_ALLOWED_ORIGINS: '${APDL_ADMIN_ALLOWED_ORIGINS:-["http://localhost:5173","http://localhost:5174"]}'
       APDL_ADMIN_COOKIE_SECURE: ${APDL_ADMIN_COOKIE_SECURE:-false}

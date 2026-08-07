@@ -10,6 +10,14 @@ from app.request_body_limit import DEFAULT_MAX_REQUEST_BODY_BYTES
 from app.security import hash_password, token_hash, verify_password
 
 
+@pytest.fixture(autouse=True)
+def explicit_vault_admin_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(
+        "LLM_VAULT_ADMIN_TOKEN",
+        "test-vault-admin-token-is-at-least-32-bytes",
+    )
+
+
 def test_argon2id_password_hash_is_salted_and_verifiable() -> None:
     first = hash_password("a-correct-horse-battery-staple")
     second = hash_password("a-correct-horse-battery-staple")
@@ -44,6 +52,13 @@ def test_settings_ignore_removed_development_service_key(monkeypatch) -> None:
     monkeypatch.setenv("APDL_ADMIN_COOKIE_SECURE", "false")
 
     assert Settings.from_env().service_api_keys == {}
+
+
+def test_settings_require_an_explicit_vault_admin_token(monkeypatch) -> None:
+    monkeypatch.delenv("LLM_VAULT_ADMIN_TOKEN")
+
+    with pytest.raises(ValueError, match="LLM_VAULT_ADMIN_TOKEN is required"):
+        Settings.from_env()
 
 
 def test_settings_reject_wildcard_origins(monkeypatch) -> None:
