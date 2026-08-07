@@ -76,13 +76,16 @@ ALTER TABLE llm_project_policies
             project_daily_cost_limit_usd_micros
     );
 
--- Inactive setup responses expose the exact safe limits that activation will
--- apply, so the review step never presents the obsolete zero-budget bootstrap
--- values from migration 023.
+-- Inactive setup responses expose safe limits instead of the obsolete
+-- zero-budget bootstrap values from migration 023. Preserve every positive
+-- operator-configured pair; only rows that still contain a non-positive
+-- bootstrap limit receive the new defaults.
 UPDATE llm_project_policies
 SET project_daily_cost_limit_usd_micros = 20000000,
     run_cost_limit_usd_micros = 2000000,
-    updated_at = NOW();
+    updated_at = NOW()
+WHERE project_daily_cost_limit_usd_micros <= 0
+   OR run_cost_limit_usd_micros <= 0;
 
 CREATE OR REPLACE FUNCTION ensure_llm_project_policy_defaults()
 RETURNS TRIGGER
@@ -116,9 +119,10 @@ ALTER TABLE llm_project_provider_connections
 ALTER TABLE llm_project_provider_models
     ADD COLUMN inventory_version BIGINT;
 
-UPDATE llm_project_provider_models
-SET inventory_version = connection_version,
-    pricing_status = 'catalog_reviewed';
+-- Catalog-v1 inventory rows predate reviewed price metadata. Do not promote
+-- them to catalog_reviewed without that review: discard the stale projection
+-- and require an authenticated provider refresh against the current catalog.
+DELETE FROM llm_project_provider_models;
 
 ALTER TABLE llm_project_provider_models
     DROP CONSTRAINT IF EXISTS

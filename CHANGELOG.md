@@ -17,6 +17,13 @@ for its published SDKs. APDL remains a pre-1.0 developer preview.
 
 ### Changed
 
+- PostgreSQL migration 051 is a deliberate Agents setup cutover. It deactivates
+  every Agents project, removes existing tier assignments and runtime provider
+  policy copies, and discards pre-price-review model inventories. Existing
+  positive project and per-run budgets are preserved; only non-positive
+  bootstrap limits receive the new defaults. After upgrading, an owner must
+  refresh each provider inventory against the current reviewed catalog, select
+  both model tiers again, and reactivate governed analysis.
 - Codegen GitHub App authentication uses the single canonical
   `GITHUB_APP_PRIVATE_KEY_BASE64` setting. Supply one unwrapped line of standard
   RFC 4648 Base64 that decodes to non-empty UTF-8 PEM text; invalid values fail

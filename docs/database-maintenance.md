@@ -134,6 +134,27 @@ does not qualify that upgrade path: the migration is covered only as part of a
 fresh, empty canonical sequence. Do not use the fresh-cluster role bootstrap or
 migration `044` as an in-place upgrade procedure.
 
+### Migration 051 is an explicit Agents setup cutover
+
+Migration `051_agents_project_setup.sql` deliberately deactivates every Agents
+project and removes the pre-cutover tier assignments, runtime provider-policy
+copies, and model inventories that lack reviewed catalog pricing. It preserves
+positive project and per-run limits; only rows retaining a non-positive
+bootstrap limit receive the new defaults. The provider connections themselves
+remain, but their model projections must be refreshed against the deployed
+catalog before an owner can select both tiers and reactivate analysis.
+
+Stop Agents workers before applying this cutover. Record the projects and
+providers that must be reconfigured, apply the migration, deploy a release with
+current reviewed price metadata, refresh each inventory, reselect both model
+tiers, and reactivate deliberately. There is no live provider-pricing lookup:
+release maintainers own catalog price updates and operators must keep a project
+inactive whenever those values are known to be stale.
+
+Migration checksums are immutable. A development database that applied an
+earlier, unmerged form of migration 051 must be rebuilt from an empty database;
+the migration ledger intentionally rejects that checksum drift.
+
 ## Failure and rerun
 
 Do not edit an applied migration. Preserve the logs and rerun the same supported

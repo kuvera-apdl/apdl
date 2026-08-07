@@ -599,7 +599,12 @@ def test_migration_splits_analysis_activation_from_operator_effect_authority() -
     assert "ADD COLUMN state TEXT NOT NULL DEFAULT 'inactive'" in sql
     assert "SET DEFAULT 20000000" in sql
     assert "SET DEFAULT 2000000" in sql
+    assert "WHERE project_daily_cost_limit_usd_micros <= 0" in sql
+    assert "OR run_cost_limit_usd_micros <= 0" in sql
     assert "DELETE FROM llm_project_model_assignments;" in sql
+    assert "DELETE FROM llm_project_provider_policies;" in sql
+    assert "DELETE FROM llm_project_provider_models;" in sql
+    assert "UPDATE llm_project_provider_models" not in sql
     assert "VALUES (NEW.project_id)" in sql
     assert "'local'" not in sql
     assert "'agents:approve' = ANY(NEW.roles)" in sql
