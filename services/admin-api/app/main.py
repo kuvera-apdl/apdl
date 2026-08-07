@@ -13,7 +13,7 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from app import auth, credentials, members, projects, proxy
+from app import auth, credentials, github, members, projects, proxy
 from app.config import Settings
 from app.request_body_limit import RequestBodyLimitMiddleware
 
@@ -243,6 +243,7 @@ app.include_router(auth.router)
 app.include_router(projects.router)
 app.include_router(members.router)
 app.include_router(credentials.router)
+app.include_router(github.router)
 app.include_router(proxy.router)
 
 

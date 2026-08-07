@@ -18,10 +18,12 @@ against ClickHouse over FastAPI (port **8082**).
 
 ## API
 
-Every analytics route requires a registered `X-API-Key` credential with
-`query:read`. The requested `project_id` must match the project on the verified
-credential and must be a 1–64 character ASCII alphanumeric string; values are
-never coerced. Health and readiness probes remain public.
+Every analytics route requires `query:read` from exactly one authority header:
+a registered `X-API-Key`, or a private, short-lived
+`X-APDL-Internal-Capability` for one live Agents execution. The requested
+`project_id` must match the project on the verified authority and must be a
+1–64 character ASCII alphanumeric string; values are never coerced. Health and
+readiness probes remain public.
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -191,10 +193,10 @@ OSS developer preview.
 Automatic guardrail enforcement is disabled in the OSS developer preview.
 Guardrail queries are read-only and never mutate Config state.
 
-Experiment analysis synchronously delegates the already authenticated
-project-scoped `X-API-Key` to Config. Config independently reauthenticates it
-and permits only its read-only analysis projection to credentials carrying
-`query:read`; no second service credential or caller-selected project is used.
+Experiment analysis synchronously delegates the exact already authenticated
+authority header to Config. Config independently reauthenticates it and permits
+only its read-only analysis projection to callers carrying `query:read`; no
+second service credential or caller-selected project is used.
 
 ## Running locally
 

@@ -15,7 +15,7 @@ from typing import Any
 
 import httpx
 
-from app.config import github_api_url
+from app.config import GITHUB_API_URL
 
 _TIMEOUT = 30.0
 
@@ -30,7 +30,7 @@ def _validate_github_api_url(
     error_type: type[ValueError],
 ) -> str:
     target = httpx.URL(url)
-    configured = httpx.URL(github_api_url())
+    configured = httpx.URL(GITHUB_API_URL)
     if target.userinfo or (
         target.scheme,
         target.host,
@@ -40,7 +40,7 @@ def _validate_github_api_url(
         configured.host,
         configured.port,
     ):
-        raise error_type("GitHub request attempted to leave the configured API host")
+        raise error_type("GitHub request attempted to leave the canonical API host")
     return url
 
 

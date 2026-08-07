@@ -203,7 +203,7 @@ test.each([
   }
 })
 
-test('creates a project and opens its grouped project-management sections', async () => {
+test('creates a project and renders its management panels as tabs', async () => {
   let submitted: unknown = null
   let csrfHeader: string | null = null
   const withProject = {
@@ -318,12 +318,6 @@ test('creates a project and opens its grouped project-management sections', asyn
   expect(projectPanel).toHaveAttribute('aria-expanded', 'true')
   expect(projectPanel).toHaveTextContent('firstproject')
   expect(projectPanel).toHaveTextContent('8 permissions · new-admin@example.com')
-  expect(screen.getByText('Your Access')).toBeInTheDocument()
-  expect(await screen.findByText('Project Authority')).toBeInTheDocument()
-  expect(screen.getByText('Members')).toBeInTheDocument()
-  expect(screen.getByText('Agents')).toBeInTheDocument()
-  expect(await screen.findByText('Project LLM credential vault')).toBeInTheDocument()
-  expect(screen.getByText('SDK Credentials')).toBeInTheDocument()
   expect(screen.queryByText('No project access yet')).not.toBeInTheDocument()
   expect(submitted).toEqual({ project_id: 'firstproject' })
   expect(csrfHeader).toBe('project-csrf')
@@ -343,6 +337,42 @@ test('creates a project and opens its grouped project-management sections', asyn
   await waitFor(() =>
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument(),
   )
+
+  const projectTabs = screen.getByRole('tablist', { name: 'Manage project firstproject' })
+  expect(within(projectTabs).getAllByRole('tab')).toHaveLength(5)
+  expect(within(projectTabs).getByRole('tab', { name: 'Agentic runs' })).toHaveAttribute(
+    'aria-selected',
+    'true',
+  )
+  expect(screen.queryByText('Your Access')).not.toBeInTheDocument()
+  expect(screen.queryByText('Project Authority')).not.toBeInTheDocument()
+  expect(screen.queryByText('Project LLM credential vault')).not.toBeInTheDocument()
+  expect(screen.queryByText('SDK Credentials')).not.toBeInTheDocument()
+
+  await userEvent.click(within(projectTabs).getByRole('tab', { name: 'Access' }))
+  expect(within(screen.getByRole('tabpanel')).getByText('Your Access')).toBeInTheDocument()
+  expect(
+    within(screen.getByRole('tabpanel')).queryByText('Agentic runs'),
+  ).not.toBeInTheDocument()
+
+  await userEvent.click(within(projectTabs).getByRole('tab', { name: 'Members' }))
+  const membersPanel = screen.getByRole('tabpanel')
+  expect(await within(membersPanel).findByText('Project Authority')).toBeInTheDocument()
+  expect(within(membersPanel).getByText('Members')).toBeInTheDocument()
+  expect(screen.queryByText('Your Access')).not.toBeInTheDocument()
+
+  await userEvent.click(within(projectTabs).getByRole('tab', { name: 'LLM connections' }))
+  const llmPanel = screen.getByRole('tabpanel')
+  expect(await within(llmPanel).findByText('Project LLM credential vault')).toBeInTheDocument()
+  expect(within(llmPanel).queryByText('Members')).not.toBeInTheDocument()
+
+  await userEvent.click(within(projectTabs).getByRole('tab', { name: 'SDK credentials' }))
+  expect(
+    await within(screen.getByRole('tabpanel')).findByText('SDK Credentials'),
+  ).toBeInTheDocument()
+  expect(screen.queryByText('Project LLM credential vault')).not.toBeInTheDocument()
+
+  await userEvent.click(within(projectTabs).getByRole('tab', { name: 'Agentic runs' }))
   await userEvent.click(
     screen.getByRole('button', { name: 'Set up Agentic runs' }),
   )

@@ -35,6 +35,9 @@ from app.safety.policy import (
 
 _DEFAULT_MODEL = "claude-opus-4-8"
 _GITHUB_APP_KEY_BASE64_SETTING = "GITHUB_APP_PRIVATE_KEY_BASE64"
+_GITHUB_WEBHOOK_SECRET_PATTERN = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
+GITHUB_API_URL = "https://api.github.com"
+GITHUB_WEB_URL = "https://github.com"
 MAX_CODEGEN_JOB_BUDGET_SECONDS = _MAX_CODEGEN_JOB_BUDGET_SECONDS
 logger = logging.getLogger(__name__)
 
@@ -97,14 +100,46 @@ def github_app_private_key() -> str:
     return private_key
 
 
-def github_api_url() -> str:
-    """Base URL for the GitHub REST API (override for GitHub Enterprise)."""
-    return os.getenv("GITHUB_API_URL", "https://api.github.com")
+def github_app_slug() -> str:
+    """Public slug of the GitHub App used for user-managed installation."""
+    return os.getenv("GITHUB_APP_SLUG", "")
 
 
-def github_webhook_secret() -> str:
-    """HMAC secret for inbound GitHub webhooks. Empty disables the endpoint."""
-    return os.getenv("GITHUB_WEBHOOK_SECRET", "")
+def github_app_client_id() -> str:
+    """GitHub App OAuth client id."""
+    return os.getenv("GITHUB_APP_CLIENT_ID", "")
+
+
+def github_app_client_secret() -> str:
+    """GitHub App OAuth client secret; never expose it in API responses."""
+    return os.getenv("GITHUB_APP_CLIENT_SECRET", "")
+
+
+def github_app_callback_url() -> str:
+    """Exact callback URL registered on the GitHub App."""
+    return os.getenv("GITHUB_APP_CALLBACK_URL", "")
+
+
+def github_webhook_secret(*, ci_poll_interval: int) -> str | None:
+    """Return the optional startup-bound GitHub webhook HMAC secret.
+
+    Polling is the recovery source when the webhook is disabled.  A deployment
+    may disable polling only after configuring a canonical webhook secret.
+    """
+    secret = os.getenv("GITHUB_WEBHOOK_SECRET", "")
+    if secret == "":
+        if ci_poll_interval == 0:
+            raise RuntimeError(
+                "GITHUB_WEBHOOK_SECRET is required when "
+                "CODEGEN_CI_POLL_INTERVAL is 0"
+            )
+        return None
+    if _GITHUB_WEBHOOK_SECRET_PATTERN.fullmatch(secret) is None:
+        raise RuntimeError(
+            "GITHUB_WEBHOOK_SECRET must contain 32 to 128 ASCII letters, "
+            "digits, underscores, or hyphens"
+        )
+    return secret
 
 
 # --- Codegen editor configuration -----------------------------------------

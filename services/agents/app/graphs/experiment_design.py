@@ -52,6 +52,7 @@ from app.tools.experiments import (
     create_experiment_draft as create_config_experiment_draft,
     get_active_experiments,
 )
+from app.service_auth import ServiceCapabilityContext
 
 logger = logging.getLogger(__name__)
 _safety = SafetyValidator()
@@ -149,6 +150,7 @@ def treatment_changeset_task(design: dict[str, Any]) -> tuple[str, str] | None:
 
 
 async def open_treatment_changeset(
+    capability: ServiceCapabilityContext,
     pool: Any,
     project_id: str,
     run_id: str,
@@ -166,6 +168,7 @@ async def open_treatment_changeset(
         return ""
     title, spec = task
     changeset = await open_changeset(
+        capability=capability,
         project_id=project_id,
         title=title,
         spec=spec,
@@ -196,6 +199,7 @@ async def open_treatment_changeset(
 
 
 async def stage_experiment_draft(
+    capability: ServiceCapabilityContext,
     project_id: str,
     experiment: dict[str, Any],
     *,
@@ -216,6 +220,7 @@ async def stage_experiment_draft(
     description = experiment.get("description") or experiment.get("hypothesis", "")
 
     await create_config_experiment_draft(
+        capability=capability,
         project_id=project_id,
         idempotency_key=idempotency_key,
         experiment_id=experiment_id or flag_key,
@@ -477,7 +482,10 @@ class ExperimentDesignAgent(BaseAgent):
         self, ctx: AgentContext, state: dict[str, Any], working: dict[str, Any]
     ) -> dict[str, Any]:
         try:
-            active = await get_active_experiments(project_id=ctx.project_id)
+            active = await get_active_experiments(
+                capability=ctx.service_capability(),
+                project_id=ctx.project_id,
+            )
             if not isinstance(active, list):
                 raise TypeError("Config experiment response was not a list")
             active_evidence = {

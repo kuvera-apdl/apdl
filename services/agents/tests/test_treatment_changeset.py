@@ -13,6 +13,7 @@ from app.graphs.experiment_design import (
     open_treatment_changeset,
     treatment_changeset_task,
 )
+from tests.capability_helpers import make_mutation_capability
 
 
 class _FakeAudit:
@@ -89,6 +90,7 @@ def test_task_none_without_flag_key():
 async def test_open_returns_changeset_id_and_links_ledger(monkeypatch):
     captured: dict[str, Any] = {}
     linked: list[tuple[str, str]] = []
+    capability = make_mutation_capability(project_id="apdl", run_id="run-1")
 
     async def fake_open_changeset(**kwargs):
         captured.update(kwargs)
@@ -101,6 +103,7 @@ async def test_open_returns_changeset_id_and_links_ledger(monkeypatch):
     monkeypatch.setattr(experiment_design, "link_changeset", fake_link)
 
     changeset_id = await open_treatment_changeset(
+        capability,
         object(),
         "apdl",
         "run-1",
@@ -109,6 +112,7 @@ async def test_open_returns_changeset_id_and_links_ledger(monkeypatch):
     )
 
     assert changeset_id == "cs-1"
+    assert captured["capability"] is capability
     assert captured["project_id"] == "apdl" and captured["run_id"] == "run-1"
     assert captured["idempotency_key"] == "command:effect"
     assert captured["context"] == {
@@ -127,6 +131,7 @@ async def test_open_skips_config_only_design(monkeypatch):
     monkeypatch.setattr(experiment_design, "open_changeset", fail_open)
     assert (
         await open_treatment_changeset(
+            make_mutation_capability(project_id="apdl", run_id="run-1"),
             None,
             "apdl",
             "run-1",

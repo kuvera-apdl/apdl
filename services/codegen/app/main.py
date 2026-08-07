@@ -44,6 +44,7 @@ from app.config import (
     codegen_sandbox_network,
     codegen_stale_sweep_interval,
     codegen_trusted_repos_only,
+    github_webhook_secret,
     postgres_url,
 )
 from app.db import assert_schema_ready
@@ -63,6 +64,9 @@ from app.github.pulls import (
 from app.github.token_broker import GitHubTokenBroker
 from app.jobs.ci_poller import run_github_poller
 from app.jobs.pr_publication import resume_pull_request_publication
+from app.jobs.repository_authorization_cleanup import (
+    run_repository_authorization_cleanup,
+)
 from app.jobs.repair import repair_failed_ci
 from app.jobs.runner import run_changeset_job, run_stale_sweeper
 from app.llm.broker_directory import prepare_broker_root
@@ -77,6 +81,7 @@ from app.routers import (
     capabilities,
     changesets,
     connections,
+    github_authorizations,
     llm_vault,
     llm_connections,
     webhooks,
@@ -85,6 +90,7 @@ from app.runtime.collector import collect_runtime_evidence
 from app.safety.policy import load_platform_safety_policy
 from app.store import changesets as changeset_store
 from app.store import pr_publication as publication_store
+from app.store import repository_authorizations as repository_authorization_store
 from app.store.llm_connections import ProjectConnectionStore
 from app.store.llm_credentials import ProjectCredentialStore
 from app.strict_json import StrictConnectionJsonMiddleware
@@ -318,6 +324,10 @@ def _make_publication_gate() -> ConfiguredPublicationGate:
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     """Manage startup/shutdown of shared resources."""
+    poll_interval = codegen_ci_poll_interval()
+    application.state.github_webhook_secret = github_webhook_secret(
+        ci_poll_interval=poll_interval
+    )
     platform_safety_policy = load_platform_safety_policy()
     application.state.platform_codegen_safety_policy = platform_safety_policy
     publication_gate = _make_publication_gate()
@@ -349,6 +359,7 @@ async def lifespan(application: FastAPI):
     requeued_jobs: list[asyncio.Task] = []
     poller_task: asyncio.Task | None = None
     sweeper_task: asyncio.Task | None = None
+    repository_authorization_cleanup_task: asyncio.Task | None = None
     try:
         application.state.pg_pool = pool
         application.state.authenticator = PostgresAuthenticator(pool)
@@ -369,6 +380,11 @@ async def lifespan(application: FastAPI):
 
         async with pool.acquire() as conn:
             await assert_schema_ready(conn)
+        await repository_authorization_store.purge_expired_authorizations(pool)
+        repository_authorization_cleanup_task = asyncio.create_task(
+            run_repository_authorization_cleanup(pool),
+            name="github-repository-authorization-cleanup",
+        )
         await token_broker.start()
         branch_publisher = GitBranchPublisher()
         publication_recovery_deps = {
@@ -490,7 +506,6 @@ async def lifespan(application: FastAPI):
         # CI poller: the zero-config trigger that keeps open changesets advancing
         # without an inbound webhook (the common self-hosted case). Disabled when the
         # interval is 0 — e.g. once a low-latency GitHub webhook is wired instead.
-        poll_interval = codegen_ci_poll_interval()
         if poll_interval > 0:
             poller_task = asyncio.create_task(
                 run_github_poller(
@@ -523,7 +538,13 @@ async def lifespan(application: FastAPI):
         yield
     finally:
         periodic_tasks = [
-            task for task in (poller_task, sweeper_task) if task is not None
+            task
+            for task in (
+                poller_task,
+                sweeper_task,
+                repository_authorization_cleanup_task,
+            )
+            if task is not None
         ]
         for task in periodic_tasks:
             task.cancel()
@@ -604,10 +625,12 @@ async def sanitized_request_validation_error(
 auth_dependencies = [Depends(authenticate_request)]
 app.include_router(llm_vault.router)
 app.include_router(connections.router, dependencies=auth_dependencies)
+app.include_router(github_authorizations.router, dependencies=auth_dependencies)
 app.include_router(llm_connections.router, dependencies=auth_dependencies)
 app.include_router(capabilities.router, dependencies=auth_dependencies)
 app.include_router(changesets.router, dependencies=auth_dependencies)
 app.include_router(webhooks.router)
+app.include_router(github_authorizations.public_router)
 
 
 @app.get("/health")

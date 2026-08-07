@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 import os
+import re
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from uuid import UUID
@@ -554,6 +556,27 @@ def test_snapshot_sql_requires_canonical_integer_json_numbers() -> None:
             f"assignment->>'{field}'\n"
             "        ) ~ '^(0|[1-9][0-9]*)$'"
         ) in assignment_migration
+
+
+def test_runtime_queries_never_row_lock_read_only_vault_authority() -> None:
+    source = (
+        ROOT / "services/codegen/app/store/llm_routing.py"
+    ).read_text(encoding="utf-8")
+    vault_queries = [
+        node.value
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and "llm_vault_provider_credentials" in node.value
+    ]
+
+    assert vault_queries
+    for query in vault_queries:
+        assert re.search(r"FOR SHARE(?! OF)", query) is None
+        assert re.search(
+            r"FOR SHARE OF[\s\S]*\b(?:credential|consumer)\b",
+            query,
+        ) is None
 
 
 def test_snapshot_runtime_accepts_tenant_assignments_and_rejects_deployment_drift(

@@ -8,7 +8,7 @@ from typing import Literal
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.config import github_api_url
+from app.config import GITHUB_API_URL
 from app.github.artifacts import StaleActionsHeadError
 from app.github.client import gh_client, gh_headers, github_json_pages
 from app.safety.secrets import redact_secrets
@@ -69,7 +69,7 @@ async def _exact_run(
     token: str,
 ) -> dict:
     response = await client.get(
-        f"{github_api_url()}/repos/{repo}/actions/runs/{run_id}",
+        f"{GITHUB_API_URL}/repos/{repo}/actions/runs/{run_id}",
         headers=gh_headers(token),
     )
     response.raise_for_status()
@@ -96,7 +96,7 @@ async def list_workflow_runs(
     _validate_head_sha(head_sha)
     if max_pages <= 0:
         raise ValueError("head_sha and a positive max_pages are required")
-    base = github_api_url()
+    base = GITHUB_API_URL
     runs: list[ActionsWorkflowRun] = []
     url = (
         f"{base}/repos/{repo}/actions/runs?head_sha={head_sha}&per_page={_PER_PAGE}"
@@ -139,7 +139,7 @@ async def list_run_jobs(
     if max_pages <= 0:
         raise ValueError("max_pages must be positive")
     _validate_head_sha(head_sha)
-    base = github_api_url()
+    base = GITHUB_API_URL
     jobs: list[ActionsJob] = []
     async with gh_client(client) as c:
         await _exact_run(c, repo, run_id, head_sha, token)
@@ -181,7 +181,7 @@ async def _download_log_prefix(
 ) -> tuple[bytes, bool]:
     """Follow bounded redirects and stream only a redaction-safe log prefix."""
     current = url
-    configured = httpx.URL(github_api_url())
+    configured = httpx.URL(GITHUB_API_URL)
     for _ in range(_MAX_REDIRECTS + 1):
         target = httpx.URL(current)
         is_api_origin = (target.scheme, target.host, target.port) == (
@@ -239,7 +239,7 @@ async def read_job_log(
     if max_bytes <= 0:
         raise ValueError("max_bytes must be positive")
     _validate_head_sha(head_sha)
-    base = github_api_url()
+    base = GITHUB_API_URL
     async with gh_client(client) as c:
         metadata_response = await c.get(
             f"{base}/repos/{repo}/actions/jobs/{job_id}",

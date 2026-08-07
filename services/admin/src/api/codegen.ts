@@ -4,6 +4,11 @@ import { ApiError, request, type ServiceConnection } from './http'
 import {
   changesetListSchema,
   changesetSchema,
+  githubRepositoryAuthorizationCompleteRequestSchema,
+  githubRepositoryAuthorizationIdSchema,
+  githubRepositoryAuthorizationSchema,
+  githubRepositoryAuthorizationStartRequestSchema,
+  githubRepositoryAuthorizationStartSchema,
   repoConnectionSchema,
 } from './schemas/codegen'
 import {
@@ -22,6 +27,8 @@ import { runtimeEvidenceObservationListSchema } from './schemas/codegen-runtime'
 import type {
   Changeset,
   ChangesetObservationHistory,
+  GitHubRepositoryAuthorization,
+  GitHubRepositoryAuthorizationStart,
   RepoConnection,
   RuntimeEvidenceObservation,
 } from './types/codegen'
@@ -120,6 +127,83 @@ export async function getRepoConnection(
     if (error instanceof ApiError && error.status === 404) return null
     throw error
   }
+}
+
+const GITHUB_REPOSITORY_AUTHORIZATIONS_PATH = '/v1/github/repository-authorizations'
+
+export function startGitHubRepositoryAuthorization(
+  conn: ServiceConnection,
+  projectId: string,
+): Promise<GitHubRepositoryAuthorizationStart> {
+  const body = githubRepositoryAuthorizationStartRequestSchema.parse({ project_id: projectId })
+  return request(conn, GITHUB_REPOSITORY_AUTHORIZATIONS_PATH, {
+    method: 'POST',
+    body,
+    schema: githubRepositoryAuthorizationStartSchema,
+  })
+}
+
+export async function getGitHubRepositoryAuthorization(
+  conn: ServiceConnection,
+  projectId: string,
+  authorizationId: string,
+  options: { signal?: AbortSignal } = {},
+): Promise<GitHubRepositoryAuthorization> {
+  const { project_id: canonicalProjectId } =
+    githubRepositoryAuthorizationStartRequestSchema.parse({ project_id: projectId })
+  const canonicalAuthorizationId = githubRepositoryAuthorizationIdSchema.parse(authorizationId)
+  const authorization = await request(
+    conn,
+    `${GITHUB_REPOSITORY_AUTHORIZATIONS_PATH}/${encodeURIComponent(canonicalAuthorizationId)}`,
+    {
+      query: { project_id: canonicalProjectId },
+      schema: githubRepositoryAuthorizationSchema,
+      signal: options.signal,
+    },
+  )
+  if (
+    authorization.project_id !== canonicalProjectId ||
+    authorization.authorization_id !== canonicalAuthorizationId
+  ) {
+    throw new ApiError(
+      200,
+      'schema_mismatch',
+      'Repository authorization does not match the requested project and authorization id',
+      authorization,
+    )
+  }
+  return authorization
+}
+
+export async function completeGitHubRepositoryAuthorization(
+  conn: ServiceConnection,
+  projectId: string,
+  authorizationId: string,
+  candidateId: string,
+): Promise<RepoConnection> {
+  const canonicalAuthorizationId = githubRepositoryAuthorizationIdSchema.parse(authorizationId)
+  const body = githubRepositoryAuthorizationCompleteRequestSchema.parse({
+    project_id: projectId,
+    candidate_id: candidateId,
+  })
+  const connection = await request(
+    conn,
+    `${GITHUB_REPOSITORY_AUTHORIZATIONS_PATH}/${encodeURIComponent(canonicalAuthorizationId)}/complete`,
+    {
+      method: 'POST',
+      body,
+      schema: repoConnectionSchema,
+    },
+  )
+  if (connection.project_id !== body.project_id) {
+    throw new ApiError(
+      200,
+      'schema_mismatch',
+      'Repository connection does not match the requested project',
+      connection,
+    )
+  }
+  return connection
 }
 
 export function revertChangeset(

@@ -1,17 +1,28 @@
+from contextlib import asynccontextmanager
 from typing import Any
 
 import pytest
 
+from app.service_auth import CAPABILITY_HEADER
 from app.tools import code
+from tests.capability_helpers import (
+    make_mutation_capability,
+    make_service_capability,
+)
 
 
 @pytest.mark.asyncio
 async def test_open_changeset_posts_task(monkeypatch):
     captured: dict[str, Any] = {}
+    capability = make_mutation_capability(run_id="run-1")
 
     async def fake_post(
-        project_id: str, path: str, payload: dict[str, Any] | None = None
+        received_capability,
+        project_id: str,
+        path: str,
+        payload: dict[str, Any] | None = None,
     ):
+        captured["capability"] = received_capability
         captured["project_id"] = project_id
         captured["path"] = path
         captured["payload"] = payload
@@ -20,6 +31,7 @@ async def test_open_changeset_posts_task(monkeypatch):
     monkeypatch.setattr(code, "_post", fake_post)
 
     result = await code.open_changeset(
+        capability,
         project_id="demo",
         title="Add dark mode",
         spec="Implement a dark-mode toggle.",
@@ -29,6 +41,7 @@ async def test_open_changeset_posts_task(monkeypatch):
     )
 
     assert result["changeset_id"] == "cs_1"
+    assert captured["capability"] is capability
     assert captured["project_id"] == "demo"
     assert captured["path"] == "/v1/changesets"
     assert captured["payload"]["project_id"] == "demo"
@@ -43,20 +56,82 @@ async def test_open_changeset_posts_task(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_changeset_capability_is_project_scoped_and_strict(monkeypatch):
-    async def fake_get(project_id: str, path: str, params=None):
-        assert project_id == "demo"
-        assert path == "/v1/capabilities/changeset-creation"
-        assert params == {"project_id": "demo"}
-        return {
-            "project_id": "demo",
-            "changeset_creation": "available",
-            "reasons": [],
-            "checks": dict.fromkeys(code._CAPABILITY_CHECKS, "ready"),
-        }
+    seen: dict[str, Any] = {}
 
-    monkeypatch.setattr(code, "_get", fake_get)
+    class _Response:
+        def raise_for_status(self):
+            return None
 
-    assert await code.get_changeset_creation_capability("demo") == "available"
+        def json(self):
+            return {
+                "project_id": "demo",
+                "changeset_creation": "available",
+                "reasons": [],
+                "checks": dict.fromkeys(code._CAPABILITY_CHECKS, "ready"),
+            }
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def get(self, path, *, params, headers):
+            seen.update(path=path, params=params, headers=headers)
+            return _Response()
+
+    monkeypatch.setattr(code.httpx, "AsyncClient", lambda **_kwargs: _Client())
+    delegated_headers = {"X-API-Key": "proj_demo_0123456789abcdef"}
+
+    assert (
+        await code.get_changeset_creation_capability("demo", delegated_headers)
+        == "available"
+    )
+    assert seen["path"] == "/v1/capabilities/changeset-creation"
+    assert seen["params"] == {"project_id": "demo"}
+    assert seen["headers"] == delegated_headers
+
+
+@pytest.mark.asyncio
+async def test_changeset_capability_requires_exact_delegated_human_header(monkeypatch):
+    def unexpected_client(**_kwargs):
+        pytest.fail("invalid delegated authority reached transport")
+
+    monkeypatch.setattr(code.httpx, "AsyncClient", unexpected_client)
+
+    with pytest.raises(ValueError, match="one delegated API key"):
+        await code.get_changeset_creation_capability(
+            "demo",
+            {
+                "X-API-Key": "proj_demo_0123456789abcdef",
+                CAPABILITY_HEADER: f"apdlcap_{'A' * 43}",
+            },
+        )
+
+
+def _patch_capability_response(monkeypatch, payload):
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return payload
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def get(self, path, *, params, headers):
+            assert path == "/v1/capabilities/changeset-creation"
+            assert params == {"project_id": "demo"}
+            assert set(headers) == {"X-API-Key"}
+            return _Response()
+
+    monkeypatch.setattr(code.httpx, "AsyncClient", lambda **_kwargs: _Client())
 
 
 @pytest.mark.asyncio
@@ -83,13 +158,13 @@ async def test_changeset_capability_rejects_ambiguous_responses(
     }
     payload.update(mutation)
 
-    async def fake_get(*_args, **_kwargs):
-        return payload
-
-    monkeypatch.setattr(code, "_get", fake_get)
+    _patch_capability_response(monkeypatch, payload)
 
     with pytest.raises(ValueError, match="capability response"):
-        await code.get_changeset_creation_capability("demo")
+        await code.get_changeset_creation_capability(
+            "demo",
+            {"X-API-Key": "proj_demo_0123456789abcdef"},
+        )
 
 
 @pytest.mark.parametrize(
@@ -107,10 +182,12 @@ async def test_open_changeset_rejects_noncanonical_idempotency_key(
 
     with pytest.raises(ValueError, match="idempotency_key"):
         await code.open_changeset(
+            make_mutation_capability(run_id="run-1"),
             project_id="demo",
             title="Add dark mode",
             spec="Implement a dark-mode toggle.",
             idempotency_key=idempotency_key,
+            run_id="run-1",
         )
 
 
@@ -131,13 +208,16 @@ def test_derived_changeset_key_is_stable_and_bounded():
 
 @pytest.mark.asyncio
 async def test_get_changeset(monkeypatch):
-    async def fake_get(project_id: str, path: str):
+    capability = make_service_capability()
+
+    async def fake_get(received_capability, project_id: str, path: str):
+        assert received_capability is capability
         assert project_id == "demo"
         return {"changeset_id": path.rsplit("/", 1)[-1], "status": "pr_open"}
 
     monkeypatch.setattr(code, "_get", fake_get)
 
-    result = await code.get_changeset("demo", "cs_9")
+    result = await code.get_changeset(capability, "demo", "cs_9")
     assert result["changeset_id"] == "cs_9"
     assert result["status"] == "pr_open"
 
@@ -145,24 +225,35 @@ async def test_get_changeset(monkeypatch):
 @pytest.mark.asyncio
 async def test_revert_changeset_hits_endpoint(monkeypatch):
     captured: dict[str, Any] = {}
+    capability = make_mutation_capability()
 
     async def fake_post(
-        project_id: str, path: str, payload: dict[str, Any] | None = None
+        received_capability,
+        project_id: str,
+        path: str,
+        payload: dict[str, Any] | None = None,
     ):
+        assert received_capability is capability
         assert project_id == "demo"
         captured["path"] = path
         return {"changeset_id": "cs_revert", "status": "queued"}
 
     monkeypatch.setattr(code, "_post", fake_post)
 
-    result = await code.revert_changeset("demo", "cs_9")
+    result = await code.revert_changeset(capability, "demo", "cs_9")
     assert captured["path"] == "/v1/changesets/cs_9/revert"
     assert result["changeset_id"] == "cs_revert"
 
 
 @pytest.mark.asyncio
-async def test_http_calls_use_project_scoped_service_key(monkeypatch):
+async def test_http_calls_use_run_scoped_internal_capability(monkeypatch):
     seen: dict[str, Any] = {}
+    capability = make_service_capability()
+
+    @asynccontextmanager
+    async def fake_service_headers(context, *, audiences, roles):
+        seen.update(context=context, audiences=audiences, roles=roles)
+        yield {CAPABILITY_HEADER: f"apdlcap_{'C' * 43}"}
 
     class _Response:
         def raise_for_status(self):
@@ -183,10 +274,74 @@ async def test_http_calls_use_project_scoped_service_key(monkeypatch):
             return _Response()
 
     monkeypatch.setattr(code.httpx, "AsyncClient", lambda **_kwargs: _Client())
-    monkeypatch.setenv(
-        "APDL_SERVICE_API_KEYS",
-        '{"demo":"proj_demo_0123456789abcdef"}',
-    )
+    monkeypatch.setattr(code, "service_headers", fake_service_headers)
 
-    await code._get("demo", "/v1/changesets", params={"project_id": "demo"})
-    assert seen["headers"] == {"X-API-Key": "proj_demo_0123456789abcdef"}
+    await code._get(
+        capability,
+        "demo",
+        "/v1/changesets",
+        params={"project_id": "demo"},
+    )
+    assert seen["context"] is capability
+    assert seen["audiences"] == ("codegen",)
+    assert seen["roles"] == ("agents:read",)
+    assert seen["headers"] == {CAPABILITY_HEADER: f"apdlcap_{'C' * 43}"}
+
+
+@pytest.mark.asyncio
+async def test_codegen_mutation_binds_capability_to_exact_post(monkeypatch):
+    seen: dict[str, Any] = {}
+    capability = make_mutation_capability(project_id="demo")
+    payload = {"project_id": "demo", "run_id": capability.run_id}
+
+    @asynccontextmanager
+    async def fake_service_headers(context, **kwargs):
+        seen.update(context=context, **kwargs)
+        yield {CAPABILITY_HEADER: f"apdlcap_{'C' * 43}"}
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"changeset_id": "cs_1"}
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def post(self, path, *, json, headers):
+            seen.update(path=path, payload=json, headers=headers)
+            return _Response()
+
+    monkeypatch.setattr(code, "service_headers", fake_service_headers)
+    monkeypatch.setattr(code.httpx, "AsyncClient", lambda **_kwargs: _Client())
+
+    await code._post(capability, "demo", "/v1/changesets", payload)
+
+    assert seen["context"] is capability
+    assert seen["audiences"] == ("codegen",)
+    assert seen["roles"] == ("agents:manage",)
+    assert seen["request_method"] == "POST"
+    assert seen["request_path"] == "/v1/changesets"
+    assert seen["request_json"] == payload
+    assert seen["path"] == "/v1/changesets"
+    assert seen["payload"] == payload
+
+
+@pytest.mark.asyncio
+async def test_codegen_tool_rejects_cross_project_capability_before_egress(monkeypatch):
+    def unexpected_client(**_kwargs):
+        pytest.fail("cross-project call reached transport")
+
+    monkeypatch.setattr(code.httpx, "AsyncClient", unexpected_client)
+
+    with pytest.raises(ValueError, match="must match capability project"):
+        await code._get(
+            make_service_capability(project_id="demo"),
+            "other",
+            "/v1/changesets",
+        )

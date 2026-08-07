@@ -10,8 +10,8 @@ from app.config_client import assert_experiment_analysis_capability
 
 
 REQUIRED_POSTGRES_MIGRATION = (
-    41,
-    "041_boundary_marker_retry_quarantine.sql",
+    58,
+    "058_agent_service_capabilities.sql",
 )
 REQUIRED_CLICKHOUSE_MIGRATION = (
     16,
@@ -19,6 +19,19 @@ REQUIRED_CLICKHOUSE_MIGRATION = (
 )
 REQUIRED_POSTGRES_COLUMNS = frozenset(
     {
+        ("agent_service_capabilities", "capability_id"),
+        ("agent_service_capabilities", "token_hash"),
+        ("agent_service_capabilities", "project_id"),
+        ("agent_service_capabilities", "execution_kind"),
+        ("agent_service_capabilities", "execution_id"),
+        ("agent_service_capabilities", "run_id"),
+        ("agent_service_capabilities", "execution_owner_id"),
+        ("agent_service_capabilities", "audiences"),
+        ("agent_service_capabilities", "roles"),
+        ("agent_service_capabilities", "request_sha256"),
+        ("agent_service_capabilities", "issued_at"),
+        ("agent_service_capabilities", "expires_at"),
+        ("agent_service_capabilities", "consumed_at"),
         ("event_pipeline_watermarks", "project_id"),
         ("event_pipeline_watermarks", "stream_key"),
         ("event_pipeline_watermarks", "provenance_start_stream_id"),

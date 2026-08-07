@@ -9,11 +9,6 @@ from app.main import app
 def authenticated_request_context(monkeypatch):
     monkeypatch.setenv("LLM_VAULT_URL", "http://llm-vault.test:8086")
     monkeypatch.setenv("LLM_VAULT_AGENTS_TOKEN", "agents-test-token-" * 3)
-    monkeypatch.setenv(
-        "APDL_SERVICE_API_KEYS",
-        '{"apdl":"proj_apdl_0123456789abcdef0123456789abcdef",'
-        '"demo":"proj_demo_0123456789abcdef0123456789abcdef"}',
-    )
 
     async def authenticate_test_request(request: Request):
         principal = Principal(

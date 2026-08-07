@@ -40,7 +40,7 @@ async def test_evaluate_requires_api_key():
         )
 
     assert response.status_code == 401
-    assert response.json()["detail"] == "Valid API key required"
+    assert response.json()["detail"] == "Valid API key or internal capability required"
 
 
 @pytest.mark.asyncio

@@ -25,6 +25,7 @@ from app.llm.contracts import (
     ProviderPolicy,
     cost_usd_micros,
 )
+from app.store.llm_credentials import REMOTE_PROVIDERS, ProjectCredentialStore
 
 
 _TERMINAL_ATTEMPT_STATUSES = frozenset({"succeeded", "failed", "cancelled"})
@@ -303,6 +304,21 @@ async def _assert_project_setup_active(
         )
 
 
+async def _lock_project_authority(
+    conn: Any,
+    *,
+    project_id: str,
+    provider: str,
+) -> None:
+    """Hold stable Agents setup and vault projections for this transaction."""
+    await conn.execute(
+        "SELECT pg_advisory_xact_lock_shared(hashtextextended($1, 0))",
+        f"apdl:agents-setup:{project_id}",
+    )
+    if provider in REMOTE_PROVIDERS:
+        await ProjectCredentialStore.lock_pair(conn, project_id, provider)
+
+
 def _unavailable(
     context: LlmRequestContext, operation: str, exc: Exception
 ) -> NoReturn:
@@ -512,6 +528,11 @@ async def prepare_provider_attempt(
                     "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
                     f"apdl:llm-budget:run:{context.project_id}:{context.run_id}",
                 )
+                await _lock_project_authority(
+                    conn,
+                    project_id=context.project_id,
+                    provider=provider,
+                )
                 await _assert_project_setup_active(conn, context)
                 await _assert_execution_active(conn, context)
 
@@ -592,7 +613,7 @@ async def prepare_provider_attempt(
                       AND provider.model = $3
                       AND provider.endpoint_url = $4
                       AND provider.enabled = TRUE
-                    FOR SHARE OF policy, provider
+                    FOR SHARE OF policy
                     """,
                     context.project_id,
                     provider,
@@ -788,8 +809,41 @@ async def mark_provider_egress(
     try:
         async with context.pool.acquire() as conn:
             async with conn.transaction():
+                await conn.execute(
+                    "SELECT pg_advisory_xact_lock_shared(hashtextextended($1, 0))",
+                    f"apdl:agents-setup:{context.project_id}",
+                )
+                provider = await conn.fetchval(
+                    """
+                    SELECT provider
+                    FROM llm_provider_attempts
+                    WHERE attempt_id = $1
+                      AND project_id = $2
+                      AND run_id = $3
+                      AND execution_owner_id = $4
+                    """,
+                    attempt_id,
+                    context.project_id,
+                    context.run_id,
+                    context.execution_owner_id,
+                )
+                if provider is None:
+                    raise LlmCredentialUnavailableError(
+                        f"Provider attempt {attempt_id} lost credential authority"
+                    )
+                if str(provider) in REMOTE_PROVIDERS:
+                    await ProjectCredentialStore.lock_pair(
+                        conn,
+                        context.project_id,
+                        str(provider),
+                    )
                 await _assert_project_setup_active(conn, context)
                 await _assert_execution_active(conn, context)
+                # Vault authority is read-only to the runtime role. The exact
+                # credential was already revalidated by just-in-time vault
+                # access; row-lock only runtime-owned authority here because a
+                # PostgreSQL row lock would require forbidden vault UPDATE
+                # privilege.
                 authorized = await conn.fetchval(
                     """
                     SELECT attempt.attempt_id
@@ -849,8 +903,6 @@ async def mark_provider_egress(
                       AND attempt.execution_owner_id = $4
                       AND attempt.status = 'prepared'
                     FOR UPDATE OF attempt
-                    FOR SHARE OF policy, assignment, provider_policy,
-                                 connection, inventory, credential, consumer
                     """,
                     attempt_id,
                     context.project_id,

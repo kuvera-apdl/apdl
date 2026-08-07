@@ -7,7 +7,7 @@ from typing import Literal
 from fastapi import APIRouter, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.auth import require_project
+from app.auth import delegated_api_key_headers, require_project
 from app.framework.gating import autonomous_mutations_enabled
 from app.readiness import CodegenChangesetCapability, codegen_changeset_capability
 
@@ -37,5 +37,8 @@ async def execution_capabilities(
     return ProjectExecutionCapabilities(
         project_id=project_id,
         autonomous_mutations_operator_enabled=autonomous_mutations_enabled(),
-        codegen_changeset_creation=await codegen_changeset_capability(project_id),
+        codegen_changeset_creation=await codegen_changeset_capability(
+            project_id,
+            delegated_api_key_headers(request),
+        ),
     )

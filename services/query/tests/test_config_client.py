@@ -14,6 +14,9 @@ from app.config_client import (
 
 PROJECT_ID = "apiasport"
 SERVICE_KEY = "proj_apiasport_0123456789abcdef"
+CAPABILITY = "apdlcap_" + "D" * 43
+API_KEY_HEADERS = {"X-API-Key": SERVICE_KEY}
+CAPABILITY_HEADERS = {"X-APDL-Internal-Capability": CAPABILITY}
 
 
 def _metadata(key: str = "exp_123") -> dict:
@@ -114,10 +117,33 @@ async def test_fetch_experiment_analysis_delegates_scoped_key(monkeypatch):
 
     _install_transport(monkeypatch, handler)
 
-    result = await fetch_experiment_analysis(PROJECT_ID, "exp.key-1", SERVICE_KEY)
+    result = await fetch_experiment_analysis(
+        PROJECT_ID,
+        "exp.key-1",
+        API_KEY_HEADERS,
+    )
 
     assert result.key == "exp.key-1"
     assert result.metric_event == "purchase"
+
+
+@pytest.mark.asyncio
+async def test_fetch_experiment_analysis_delegates_internal_capability(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.raw_path == b"/v1/experiments/exp_123/analysis"
+        assert "x-api-key" not in request.headers
+        assert request.headers["x-apdl-internal-capability"] == CAPABILITY
+        return httpx.Response(200, json=_metadata())
+
+    _install_transport(monkeypatch, handler)
+
+    result = await fetch_experiment_analysis(
+        PROJECT_ID,
+        "exp_123",
+        CAPABILITY_HEADERS,
+    )
+
+    assert result.key == "exp_123"
 
 
 @pytest.mark.asyncio
@@ -128,7 +154,7 @@ async def test_fetch_experiment_analysis_maps_not_found(monkeypatch):
     )
 
     with pytest.raises(ExperimentNotFound, match="experiment missing"):
-        await fetch_experiment_analysis(PROJECT_ID, "missing", SERVICE_KEY)
+        await fetch_experiment_analysis(PROJECT_ID, "missing", API_KEY_HEADERS)
 
 
 @pytest.mark.asyncio
@@ -139,7 +165,7 @@ async def test_fetch_experiment_analysis_maps_conflict(monkeypatch):
     )
 
     with pytest.raises(ExperimentNotAnalyzable, match="draft is not analyzable"):
-        await fetch_experiment_analysis(PROJECT_ID, "draft", SERVICE_KEY)
+        await fetch_experiment_analysis(PROJECT_ID, "draft", API_KEY_HEADERS)
 
 
 @pytest.mark.asyncio
@@ -150,7 +176,7 @@ async def test_fetch_experiment_analysis_fails_closed_on_network_error(monkeypat
     _install_transport(monkeypatch, handler)
 
     with pytest.raises(ConfigServiceUnavailable, match="request failed"):
-        await fetch_experiment_analysis(PROJECT_ID, "exp_123", SERVICE_KEY)
+        await fetch_experiment_analysis(PROJECT_ID, "exp_123", API_KEY_HEADERS)
 
 
 @pytest.mark.asyncio
@@ -163,7 +189,7 @@ async def test_fetch_experiment_analysis_rejects_extra_fields(monkeypatch):
     )
 
     with pytest.raises(ConfigServiceUnavailable, match="invalid.*contract"):
-        await fetch_experiment_analysis(PROJECT_ID, "exp_123", SERVICE_KEY)
+        await fetch_experiment_analysis(PROJECT_ID, "exp_123", API_KEY_HEADERS)
 
 
 @pytest.mark.asyncio
@@ -186,7 +212,7 @@ async def test_fetch_experiment_analysis_rejects_coerced_plan_numbers(
     _install_transport(monkeypatch, lambda _: httpx.Response(200, json=payload))
 
     with pytest.raises(ConfigServiceUnavailable, match="invalid.*contract"):
-        await fetch_experiment_analysis(PROJECT_ID, "exp_123", SERVICE_KEY)
+        await fetch_experiment_analysis(PROJECT_ID, "exp_123", API_KEY_HEADERS)
 
 
 @pytest.mark.asyncio
@@ -197,19 +223,29 @@ async def test_fetch_experiment_analysis_rejects_mismatched_key(monkeypatch):
     )
 
     with pytest.raises(ConfigServiceUnavailable, match="different experiment"):
-        await fetch_experiment_analysis(PROJECT_ID, "exp_123", SERVICE_KEY)
+        await fetch_experiment_analysis(PROJECT_ID, "exp_123", API_KEY_HEADERS)
 
 
 @pytest.mark.asyncio
-async def test_fetch_experiment_analysis_rejects_cross_project_delegation(monkeypatch):
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {},
+        {"Authorization": "Bearer obsolete"},
+        {
+            "X-API-Key": SERVICE_KEY,
+            "X-APDL-Internal-Capability": CAPABILITY,
+        },
+    ],
+)
+async def test_fetch_experiment_analysis_rejects_ambiguous_delegation(
+    monkeypatch,
+    headers,
+):
     _install_transport(
         monkeypatch,
         lambda _: pytest.fail("Config must not receive a cross-project key"),
     )
 
-    with pytest.raises(ConfigServiceUnavailable, match="credential is unavailable"):
-        await fetch_experiment_analysis(
-            PROJECT_ID,
-            "exp_123",
-            "proj_another_0123456789abcdef",
-        )
+    with pytest.raises(ConfigServiceUnavailable, match="authority is unavailable"):
+        await fetch_experiment_analysis(PROJECT_ID, "exp_123", headers)

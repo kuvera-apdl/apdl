@@ -17,7 +17,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from app.config import github_api_url
+from app.config import GITHUB_API_URL
 from app.github.client import gh_client, gh_headers, github_next_page
 from app.models.observations import GitHubPRStatus
 from app.models.pr_publication import PullRequestAcceptedReceipt
@@ -91,7 +91,7 @@ def _absolute_url(value: Any) -> str | None:
 
 def _url_matches_pull_request(url: str, repository: str, number: int) -> bool:
     parsed = urlparse(url)
-    api = urlparse(github_api_url())
+    api = urlparse(GITHUB_API_URL)
     expected_netloc = "github.com" if api.netloc == "api.github.com" else api.netloc
     return (
         parsed.scheme == api.scheme
@@ -281,7 +281,7 @@ async def open_pull_request(
     client: httpx.AsyncClient | None = None,
 ) -> PullRequest:
     """Create a PR, journal the accepted response, then validate its identity."""
-    url = f"{github_api_url()}/repos/{repo}/pulls"
+    url = f"{GITHUB_API_URL}/repos/{repo}/pulls"
     payload = {"title": title, "head": head, "base": base, "body": body, "draft": draft}
 
     async with gh_client(client) as c:
@@ -325,7 +325,7 @@ async def find_pull_request_by_branch(
 ) -> PullRequest | None:
     """Recover one PR in any state by the deterministic APDL branch."""
     owner = repo.partition("/")[0]
-    url = f"{github_api_url()}/repos/{repo}/pulls"
+    url = f"{GITHUB_API_URL}/repos/{repo}/pulls"
     params = {
         "state": "all",
         "head": f"{owner}:{head}",
@@ -421,7 +421,7 @@ async def close_pull_request(
     client: httpx.AsyncClient | None = None,
 ) -> None:
     """Validate APDL ownership, then close the exact unmerged pull request."""
-    url = f"{github_api_url()}/repos/{repo}/pulls/{number}"
+    url = f"{GITHUB_API_URL}/repos/{repo}/pulls/{number}"
     async with gh_client(client) as c:
         response = await c.get(url, headers=gh_headers(token))
         response.raise_for_status()
@@ -498,7 +498,7 @@ async def get_pull_request(
     client: httpx.AsyncClient | None = None,
 ) -> dict[str, Any]:
     """Read the live GitHub PR used by webhook and polling recovery."""
-    url = f"{github_api_url()}/repos/{repo}/pulls/{number}"
+    url = f"{GITHUB_API_URL}/repos/{repo}/pulls/{number}"
     async with gh_client(client) as c:
         response = await c.get(url, headers=gh_headers(token))
         response.raise_for_status()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Annotated, Literal
 from uuid import UUID
@@ -26,6 +27,7 @@ PROJECT_PATTERN = r"^[A-Za-z0-9]{1,64}$"
 MODEL_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
 
 router = APIRouter(prefix="/v1/agents/setup", tags=["agents"])
+logger = logging.getLogger(__name__)
 
 
 class ModelSelectionRequest(BaseModel):
@@ -211,6 +213,7 @@ def _error(exc: Exception) -> HTTPException:
         return HTTPException(status_code=409, detail=str(exc))
     if isinstance(exc, AgentsSetupValidationError):
         return HTTPException(status_code=422, detail=str(exc))
+    logger.exception("Agents project setup storage operation failed")
     return HTTPException(
         status_code=503,
         detail="Agents project setup storage is unavailable",

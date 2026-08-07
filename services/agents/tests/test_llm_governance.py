@@ -579,10 +579,12 @@ async def test_tool_completion_uses_the_same_governance_path(monkeypatch):
 
 @dataclass
 class _BudgetBackend:
+    provider: str = "openai"
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     calls: dict[UUID, str] = field(default_factory=dict)
     attempts: list[dict[str, Any]] = field(default_factory=list)
     advisory_locks: list[str] = field(default_factory=list)
+    policy_queries: list[str] = field(default_factory=list)
 
 
 class _Transaction:
@@ -615,22 +617,26 @@ class _BudgetConn:
             ]
             return max(matching, key=lambda item: item["attempt_number"], default=None)
         if "FROM llm_project_policies AS policy" in query:
+            self.backend.policy_queries.append(query)
+            provider = self.backend.provider
             return {
                 "required_data_residency": "ca",
                 "allow_cross_vendor_retry": False,
                 "project_daily_cost_limit_usd_micros": 10,
                 "run_cost_limit_usd_micros": 10,
-                "provider": "openai",
+                "provider": provider,
                 "model": "model-a",
-                "endpoint_url": "https://openai.example/v1",
+                "endpoint_url": f"https://{provider}.example/v1",
                 "data_residency": "ca",
                 "allowed_data_classifications": ["confidential"],
                 "input_cost_per_million_tokens_usd_micros": 1_000_000,
                 "output_cost_per_million_tokens_usd_micros": 0,
-                "credential_id": UUID(
-                    "10000000-0000-4000-8000-000000000049"
+                "credential_id": (
+                    UUID("10000000-0000-4000-8000-000000000049")
+                    if provider != "local"
+                    else None
                 ),
-                "credential_version": 1,
+                "credential_version": 1 if provider != "local" else None,
             }
         raise AssertionError(query)
 
@@ -721,6 +727,43 @@ async def test_concurrent_replicas_cannot_race_past_shared_cost_ceiling():
     assert len(backend.attempts) == 1
     assert backend.advisory_locks.count("apdl:llm-budget:project:projectA") == 2
     assert backend.advisory_locks.count("apdl:llm-budget:run:projectA:run1") == 2
+    assert backend.advisory_locks.count("apdl:agents-setup:projectA") == 2
+    assert backend.advisory_locks.count("apdl:llm-vault:projectA:openai") == 2
+    assert all("FOR SHARE OF policy" in query for query in backend.policy_queries)
+    assert all(
+        "FOR SHARE OF policy, provider" not in query
+        for query in backend.policy_queries
+    )
+
+
+@pytest.mark.asyncio
+async def test_local_attempt_uses_setup_lock_without_vault_pair_lock():
+    backend = _BudgetBackend(provider="local")
+    call_id = uuid4()
+    backend.calls = {call_id: "prepared"}
+
+    prepared = await prepare_provider_attempt(
+        _context(pool=_BudgetPool(backend)),
+        call_id=call_id,
+        attempt_number=1,
+        provider="local",
+        model="model-a",
+        endpoint_url="https://local.example/v1",
+        prompt_sha256="a" * 64,
+        estimated_input_tokens=1,
+        max_output_tokens=1,
+        model_tier="fast",
+        setup_version=7,
+        connection_version=3,
+        inventory_version=5,
+        model_catalog_version="llm-provider-catalog@2",
+    )
+
+    assert prepared.provider_policy.provider == "local"
+    assert "apdl:agents-setup:projectA" in backend.advisory_locks
+    assert not any(
+        lock.startswith("apdl:llm-vault:") for lock in backend.advisory_locks
+    )
 
 
 class _ReconcileTransaction:
@@ -732,33 +775,51 @@ class _ReconcileTransaction:
 
 
 class _EgressAuthorityConn:
-    def __init__(self, *, authorized: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        authorized: bool = True,
+        provider: str = "openai",
+    ) -> None:
         self.authorized = authorized
+        self.provider = provider
         self.queries: list[str] = []
+        self.operations: list[tuple[str, str, tuple[Any, ...]]] = []
 
     def transaction(self) -> _ReconcileTransaction:
         return _ReconcileTransaction()
 
     async def fetchrow(self, query: str, *args: Any):
         self.queries.append(query)
+        self.operations.append(("fetchrow", query, args))
         assert "FROM agent_runs" in query
         return {"active": 1}
 
     async def fetchval(self, query: str, *args: Any):
         self.queries.append(query)
+        self.operations.append(("fetchval", query, args))
+        if "SELECT provider" in query and "FROM llm_provider_attempts" in query:
+            return self.provider
         if "SELECT state = 'active'" in query:
             return True
         if "SELECT attempt.attempt_id" in query:
             assert "FOR UPDATE OF attempt" in query
-            assert "FOR SHARE OF policy, assignment, provider_policy" in query
+            assert "FOR SHARE" not in query
+            assert "FOR UPDATE OF policy" not in query
             return args[0] if self.authorized else None
         if "UPDATE llm_provider_attempts" in query:
             return args[0]
         raise AssertionError(query)
 
+    async def execute(self, query: str, *args: Any):
+        self.queries.append(query)
+        self.operations.append(("execute", query, args))
+        assert "pg_advisory_xact_lock" in query
+        return "SELECT 1"
+
 
 @pytest.mark.asyncio
-async def test_provider_egress_locks_exact_setup_and_credential_authority():
+async def test_provider_egress_serializes_unlocked_read_only_authority():
     attempt_id = uuid4()
     conn = _EgressAuthorityConn()
 
@@ -767,7 +828,45 @@ async def test_provider_egress_locks_exact_setup_and_credential_authority():
         attempt_id=attempt_id,
     )
 
+    setup_lock_index = next(
+        index
+        for index, (operation, _query, args) in enumerate(conn.operations)
+        if operation == "execute" and args == ("apdl:agents-setup:projectA",)
+    )
+    pair_lock_index = next(
+        index
+        for index, (operation, _query, args) in enumerate(conn.operations)
+        if operation == "execute"
+        and args == ("apdl:llm-vault:projectA:openai",)
+    )
+    authority_read_index = next(
+        index
+        for index, (operation, query, _args) in enumerate(conn.operations)
+        if operation == "fetchval" and "SELECT attempt.attempt_id" in query
+    )
+    assert setup_lock_index < pair_lock_index < authority_read_index
     assert any("UPDATE llm_provider_attempts" in query for query in conn.queries)
+
+
+@pytest.mark.asyncio
+async def test_local_provider_egress_skips_vault_pair_lock():
+    conn = _EgressAuthorityConn(provider="local")
+
+    await mark_provider_egress(
+        _context(pool=_ReconcilePool(conn)),
+        attempt_id=uuid4(),
+    )
+
+    lock_args = [
+        args
+        for operation, _query, args in conn.operations
+        if operation == "execute"
+    ]
+    assert ("apdl:agents-setup:projectA",) in lock_args
+    assert not any(
+        args and str(args[0]).startswith("apdl:llm-vault:")
+        for args in lock_args
+    )
 
 
 @pytest.mark.asyncio

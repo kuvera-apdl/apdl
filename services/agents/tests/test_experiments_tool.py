@@ -1,6 +1,13 @@
+from contextlib import asynccontextmanager
+
 import pytest
 
+from app.service_auth import CAPABILITY_HEADER
 from app.tools import experiments
+from tests.capability_helpers import (
+    make_mutation_capability,
+    make_service_capability,
+)
 
 VALID_STATISTICAL_PLAN = {
     "protocol": "fixed_horizon_fisher_newcombe_cc_plan_v1",
@@ -12,6 +19,36 @@ VALID_STATISTICAL_PLAN = {
     "data_settlement_seconds": 300,
 }
 IDEMPOTENCY_KEY = "command:effect"
+
+
+@pytest.fixture(autouse=True)
+def capability_authority(monkeypatch):
+    calls = []
+
+    @asynccontextmanager
+    async def fake_service_headers(
+        context,
+        *,
+        audiences,
+        roles,
+        request_method=None,
+        request_path=None,
+        request_json=None,
+        idempotency_key=None,
+    ):
+        call = {"context": context, "audiences": audiences, "roles": roles}
+        if request_method is not None:
+            call.update(
+                request_method=request_method,
+                request_path=request_path,
+                request_json=request_json,
+                idempotency_key=idempotency_key,
+            )
+        calls.append(call)
+        yield {CAPABILITY_HEADER: f"apdlcap_{'E' * 43}"}
+
+    monkeypatch.setattr(experiments, "service_headers", fake_service_headers)
+    return calls
 
 
 @pytest.mark.asyncio
@@ -52,11 +89,17 @@ async def test_get_active_experiments_rejects_incomplete_config_evidence(
     monkeypatch.setattr(experiments.httpx, "AsyncClient", FakeClient)
 
     with pytest.raises(ValueError, match="Config experiments response"):
-        await experiments.get_active_experiments("apdl")
+        await experiments.get_active_experiments(
+            make_service_capability(project_id="apdl"),
+            "apdl",
+        )
 
 
 @pytest.mark.asyncio
-async def test_get_experiment_results_uses_authoritative_query_contract(monkeypatch):
+async def test_get_experiment_results_uses_authoritative_query_contract(
+    monkeypatch,
+    capability_authority,
+):
     captured = {}
 
     class FakeResponse:
@@ -86,6 +129,7 @@ async def test_get_experiment_results_uses_authoritative_query_contract(monkeypa
     monkeypatch.setattr(experiments.httpx, "AsyncClient", FakeClient)
 
     result = await experiments.get_experiment_results(
+        capability=make_service_capability(project_id="apdl"),
         experiment_id="exp checkout",
         project_id="apdl",
     )
@@ -95,10 +139,15 @@ async def test_get_experiment_results_uses_authoritative_query_contract(monkeypa
         "path": "/v1/query/experiment/exp%20checkout",
         "params": {"project_id": "apdl"},
     }
+    assert capability_authority[-1]["audiences"] == ("config", "query")
+    assert capability_authority[-1]["roles"] == ("query:read",)
 
 
 @pytest.mark.asyncio
-async def test_create_experiment_draft_uses_config_admin_schema(monkeypatch):
+async def test_create_experiment_draft_uses_config_admin_schema(
+    monkeypatch,
+    capability_authority,
+):
     captured = {}
 
     class FakeResponse:
@@ -127,6 +176,7 @@ async def test_create_experiment_draft_uses_config_admin_schema(monkeypatch):
     monkeypatch.setattr(experiments.httpx, "AsyncClient", FakeClient)
 
     result = await experiments.create_experiment_draft(
+        capability=make_mutation_capability(project_id="apdl"),
         project_id="apdl",
         idempotency_key=IDEMPOTENCY_KEY,
         experiment_id="exp_checkout",
@@ -146,6 +196,13 @@ async def test_create_experiment_draft_uses_config_admin_schema(monkeypatch):
     assert captured["path"] == "/v1/admin/experiments"
     assert captured["params"] == {"project_id": "apdl"}
     assert captured["headers"]["Idempotency-Key"] == IDEMPOTENCY_KEY
+    assert captured["headers"][CAPABILITY_HEADER] == f"apdlcap_{'E' * 43}"
+    assert capability_authority[-1]["audiences"] == ("config",)
+    assert capability_authority[-1]["roles"] == ("config:write",)
+    assert capability_authority[-1]["request_method"] == "POST"
+    assert capability_authority[-1]["request_path"] == "/v1/admin/experiments"
+    assert capability_authority[-1]["request_json"] == captured["json"]
+    assert capability_authority[-1]["idempotency_key"] == IDEMPOTENCY_KEY
     payload = captured["json"]
     assert payload == {
         "key": "exp_checkout",
@@ -206,6 +263,7 @@ async def test_targeting_rejects_aliases_and_extra_fields(monkeypatch):
 
     with pytest.raises(ValueError, match="requires exactly"):
         await experiments.create_experiment_draft(
+            capability=make_mutation_capability(project_id="apdl"),
             project_id="apdl",
             idempotency_key=IDEMPOTENCY_KEY,
             experiment_id="exp_x",
@@ -232,6 +290,7 @@ async def test_targeting_rejects_aliases_and_extra_fields(monkeypatch):
 
     with pytest.raises(ValueError, match="unsupported targeting operator"):
         await experiments.create_experiment_draft(
+            capability=make_mutation_capability(project_id="apdl"),
             project_id="apdl",
             idempotency_key=IDEMPOTENCY_KEY,
             experiment_id="exp_x",
@@ -257,6 +316,7 @@ async def test_targeting_presence_condition_uses_omitted_value(monkeypatch):
     captured = _capture_post(monkeypatch)
 
     await experiments.create_experiment_draft(
+        capability=make_mutation_capability(project_id="apdl"),
         project_id="apdl",
         idempotency_key=IDEMPOTENCY_KEY,
         experiment_id="exp_x",
@@ -289,6 +349,7 @@ async def test_empty_targeting_conditions_are_omitted(monkeypatch):
     captured = _capture_post(monkeypatch)
 
     await experiments.create_experiment_draft(
+        capability=make_mutation_capability(project_id="apdl"),
         project_id="apdl",
         idempotency_key=IDEMPOTENCY_KEY,
         experiment_id="exp_y",
@@ -308,6 +369,7 @@ async def test_empty_targeting_conditions_are_omitted(monkeypatch):
 async def test_experiment_draft_requires_primary_metric(monkeypatch):
     _capture_post(monkeypatch)
     common = {
+        "capability": make_mutation_capability(project_id="apdl"),
         "project_id": "apdl",
         "idempotency_key": IDEMPOTENCY_KEY,
         "experiment_id": "exp_y",
@@ -329,6 +391,7 @@ async def test_experiment_draft_requires_primary_metric(monkeypatch):
 async def test_experiment_draft_requires_canonical_explicit_bucket_by(monkeypatch):
     captured = _capture_post(monkeypatch)
     common = {
+        "capability": make_mutation_capability(project_id="apdl"),
         "project_id": "apdl",
         "idempotency_key": IDEMPOTENCY_KEY,
         "experiment_id": "exp_identity",

@@ -12,6 +12,16 @@ from app.graphs import experiment_evaluation as evaluation
 from app.graphs.experiment_evaluation import ExperimentEvaluationAgent
 
 
+SERVICE_CAPABILITY = object()
+
+
+def _ctx():
+    return SimpleNamespace(
+        project_id="demo",
+        service_capability=lambda: SERVICE_CAPABILITY,
+    )
+
+
 def _config_experiment(key: str, status: str = "completed") -> dict:
     return {
         "key": key,
@@ -148,7 +158,8 @@ def test_config_experiment_identity_is_exact_and_required(bucket_by) -> None:
 
 @pytest.mark.asyncio
 async def test_gather_accepts_only_verified_completed_snapshots(monkeypatch):
-    async def experiments(project_id: str):
+    async def experiments(capability, project_id: str):
+        assert capability is SERVICE_CAPABILITY
         assert project_id == "demo"
         return [
             _config_experiment("exp_checkout"),
@@ -156,7 +167,8 @@ async def test_gather_accepts_only_verified_completed_snapshots(monkeypatch):
             _config_experiment("exp_running", "running"),
         ]
 
-    async def result(experiment_id: str, project_id: str):
+    async def result(capability, experiment_id: str, project_id: str):
+        assert capability is SERVICE_CAPABILITY
         assert project_id == "demo"
         return (
             _snapshot(experiment_id)
@@ -168,7 +180,7 @@ async def test_gather_accepts_only_verified_completed_snapshots(monkeypatch):
     monkeypatch.setattr(evaluation, "get_experiment_results", result)
 
     working = await ExperimentEvaluationAgent().gather(
-        SimpleNamespace(project_id="demo"),
+        _ctx(),
         {},
         {},
     )
@@ -185,28 +197,28 @@ async def test_gather_accepts_only_verified_completed_snapshots(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_gather_rejects_noncanonical_config_or_query_contract(monkeypatch):
-    async def bad_experiments(_project_id: str):
+    async def bad_experiments(_capability, _project_id: str):
         return [{**_config_experiment("exp_checkout"), "default_value": "control"}]
 
     monkeypatch.setattr(evaluation, "get_active_experiments", bad_experiments)
     with pytest.raises(ValueError, match="canonical list schema"):
         await ExperimentEvaluationAgent().gather(
-            SimpleNamespace(project_id="demo"),
+            _ctx(),
             {},
             {},
         )
 
-    async def experiments(_project_id: str):
+    async def experiments(_capability, _project_id: str):
         return [_config_experiment("exp_checkout")]
 
-    async def incomplete(_experiment_id: str, _project_id: str):
+    async def incomplete(_capability, _experiment_id: str, _project_id: str):
         return {**_snapshot(), "data_completeness": "not_verified"}
 
     monkeypatch.setattr(evaluation, "get_active_experiments", experiments)
     monkeypatch.setattr(evaluation, "get_experiment_results", incomplete)
     with pytest.raises(ValueError, match="analysis contract is invalid"):
         await ExperimentEvaluationAgent().gather(
-            SimpleNamespace(project_id="demo"),
+            _ctx(),
             {},
             {},
         )

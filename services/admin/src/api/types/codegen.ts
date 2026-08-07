@@ -5,6 +5,11 @@ import type {
   changesetSchema,
   contractBundleSchema,
   dependencySliceSchema,
+  githubRepositoryAuthorizationCompleteRequestSchema,
+  githubRepositoryAuthorizationSchema,
+  githubRepositoryAuthorizationStartRequestSchema,
+  githubRepositoryAuthorizationStartSchema,
+  githubRepositoryCandidateSchema,
   inspectionSnapshotSchema,
   requirementLedgerSchema,
   reviewVerdictSchema,
@@ -55,3 +60,16 @@ export type CIVerificationObservation = z.infer<typeof ciVerificationObservation
 export type CIRemediationAttempt = z.infer<typeof ciRemediationAttemptSchema>
 export type ChangesetObservationHistory = z.infer<typeof changesetObservationHistorySchema>
 export type RepoConnection = z.infer<typeof repoConnectionSchema>
+export type GitHubRepositoryAuthorizationStart = z.infer<
+  typeof githubRepositoryAuthorizationStartSchema
+>
+export type GitHubRepositoryAuthorizationStartRequest = z.infer<
+  typeof githubRepositoryAuthorizationStartRequestSchema
+>
+export type GitHubRepositoryCandidate = z.infer<typeof githubRepositoryCandidateSchema>
+export type GitHubRepositoryAuthorization = z.infer<
+  typeof githubRepositoryAuthorizationSchema
+>
+export type GitHubRepositoryAuthorizationCompleteRequest = z.infer<
+  typeof githubRepositoryAuthorizationCompleteRequestSchema
+>

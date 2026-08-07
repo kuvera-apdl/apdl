@@ -37,6 +37,7 @@ export APDL_SMOKE_BROWSER_KEY="client_demo_0123456789abcdef0123456789abcdef"
 export APDL_SERVICE_API_KEYS='{}'
 export POSTGRES_PASSWORD="apdl_dev"
 export APDL_RUNTIME_POSTGRES_PASSWORD="apdl_runtime_dev"
+export APDL_AGENTS_POSTGRES_PASSWORD="apdl_agents_dev1"
 export APDL_LLM_VAULT_POSTGRES_PASSWORD="apdl_llm_vault_dev"
 export APDL_BIND_ADDRESS="127.0.0.1"
 # Public, disposable test-only platform keys for the isolated smoke database.
@@ -46,6 +47,9 @@ export LLM_VAULT_ADMIN_TOKEN="smoke-llm-vault-admin-token-change-me"
 export LLM_VAULT_AGENTS_TOKEN="smoke-llm-vault-agents-token-change-me"
 export LLM_VAULT_CODEGEN_TOKEN="smoke-llm-vault-codegen-token-change-me"
 export LLM_VAULT_PROJECTION_TOKEN="smoke-llm-vault-projection-token-change-me"
+# Polling is intentionally disabled in the hermetic smoke stack, so Codegen's
+# conditional recovery contract requires a fixed public test-only webhook key.
+export GITHUB_WEBHOOK_SECRET="smoke_webhook_secret_0123456789abcdef"
 export CODEGEN_CI_POLL_INTERVAL=0
 export CODEGEN_STALE_SWEEP_INTERVAL=0
 
@@ -435,6 +439,7 @@ compose run --rm --no-deps \
     -e APDL_OWNER_POSTGRES_USER=apdl \
     -e APDL_OWNER_POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
     -e APDL_RUNTIME_POSTGRES_PASSWORD="$APDL_RUNTIME_POSTGRES_PASSWORD" \
+    -e APDL_AGENTS_POSTGRES_PASSWORD="$APDL_AGENTS_POSTGRES_PASSWORD" \
     -e APDL_RUNTIME_TEST_POSTGRES_URL=postgresql://apdl_runtime@postgres:5432/apdl \
     -v "$ROOT_DIR/scripts/test_postgres_operator_privileges.sh:/tmp/test_postgres_operator_privileges.sh:ro" \
     postgres-migrate \

@@ -6,10 +6,23 @@ from collections.abc import Mapping
 from typing import Any
 
 
-MIGRATION_VERSION = 55
-MIGRATION_NAME = "055_codegen_tenant_publication.sql"
+MIGRATION_VERSION = 59
+MIGRATION_NAME = "059_github_repository_user_authorization.sql"
 REQUIRED_COLUMNS = frozenset(
     {
+        ("agent_service_capabilities", "capability_id"),
+        ("agent_service_capabilities", "token_hash"),
+        ("agent_service_capabilities", "project_id"),
+        ("agent_service_capabilities", "execution_kind"),
+        ("agent_service_capabilities", "execution_id"),
+        ("agent_service_capabilities", "run_id"),
+        ("agent_service_capabilities", "execution_owner_id"),
+        ("agent_service_capabilities", "audiences"),
+        ("agent_service_capabilities", "roles"),
+        ("agent_service_capabilities", "request_sha256"),
+        ("agent_service_capabilities", "issued_at"),
+        ("agent_service_capabilities", "expires_at"),
+        ("agent_service_capabilities", "consumed_at"),
         ("admin_project_execution_authorizations", "project_id"),
         ("admin_project_execution_authorizations", "authorization_source"),
         ("admin_project_execution_authorizations", "actor"),
@@ -31,8 +44,29 @@ REQUIRED_COLUMNS = frozenset(
         ("github_repository_grants", "status"),
         ("github_repository_grants", "authorization_source"),
         ("github_repository_grants", "authorization_subject"),
+        ("github_repository_grants", "authorized_by_user_id"),
+        ("github_repository_grants", "github_user_id"),
         ("github_repository_grants", "verified_at"),
         ("github_repository_grants", "revoked_at"),
+        ("github_repository_authorization_flows", "authorization_id"),
+        ("github_repository_authorization_flows", "project_id"),
+        ("github_repository_authorization_flows", "actor_user_id"),
+        ("github_repository_authorization_flows", "state_hash"),
+        ("github_repository_authorization_flows", "status"),
+        ("github_repository_authorization_flows", "github_user_id"),
+        ("github_repository_authorization_flows", "github_login"),
+        ("github_repository_authorization_flows", "expires_at"),
+        ("github_repository_authorization_flows", "completed_at"),
+        ("github_repository_authorization_flows", "created_at"),
+        ("github_repository_authorization_flows", "updated_at"),
+        ("github_repository_authorization_candidates", "candidate_id"),
+        ("github_repository_authorization_candidates", "authorization_id"),
+        ("github_repository_authorization_candidates", "installation_id"),
+        ("github_repository_authorization_candidates", "repository_id"),
+        ("github_repository_authorization_candidates", "repository_full_name"),
+        ("github_repository_authorization_candidates", "default_base_branch"),
+        ("github_repository_authorization_candidates", "private"),
+        ("github_repository_authorization_candidates", "created_at"),
         ("codegen_changesets", "changeset_id"),
         ("codegen_changesets", "project_id"),
         ("codegen_changesets", "idempotency_key"),
@@ -130,6 +164,74 @@ REQUIRED_COLUMNS = frozenset(
         ("codegen_ci_remediation_claims", "failure_observation_id"),
     }
 )
+REQUIRED_CONSTRAINTS = frozenset(
+    {
+        (
+            "github_repository_grants",
+            "github_repository_grants_user_evidence_check",
+        ),
+        (
+            "github_repository_grants",
+            "github_repository_grants_authorization_source_check",
+        ),
+        (
+            "github_repository_grants",
+            "github_repository_grants_legacy_quarantine_check",
+        ),
+        (
+            "github_repository_grants",
+            "github_repository_grants_oauth_subject_check",
+        ),
+        (
+            "github_repository_grants",
+            "github_repository_grants_authorized_user_fkey",
+        ),
+        (
+            "github_repository_authorization_flows",
+            "github_repository_authorization_flows_pkey",
+        ),
+        (
+            "github_repository_authorization_flows",
+            "github_repository_authorization_flows_state_key",
+        ),
+        (
+            "github_repository_authorization_flows",
+            "github_repository_authorization_flows_status_check",
+        ),
+        (
+            "github_repository_authorization_flows",
+            "github_repository_authorization_flows_lifecycle_check",
+        ),
+        (
+            "github_repository_authorization_flows",
+            "github_repository_authorization_flows_project_fkey",
+        ),
+        (
+            "github_repository_authorization_flows",
+            "github_repository_authorization_flows_actor_fkey",
+        ),
+        (
+            "github_repository_authorization_candidates",
+            "github_repository_authorization_candidates_pkey",
+        ),
+        (
+            "github_repository_authorization_candidates",
+            "github_repository_authorization_candidates_flow_repository_key",
+        ),
+        (
+            "github_repository_authorization_candidates",
+            "github_repository_authorization_candidates_flow_fkey",
+        ),
+    }
+)
+REQUIRED_TRIGGERS = frozenset(
+    {
+        (
+            "github_repository_authorization_candidates",
+            "github_repository_authorization_candidates_immutable",
+        ),
+    }
+)
 
 
 async def assert_schema_ready(conn: Any) -> None:
@@ -168,4 +270,64 @@ async def assert_schema_ready(conn: Any) -> None:
         raise RuntimeError(
             f"Codegen PostgreSQL schema is incomplete ({formatted}); "
             "restore the database or apply migrations before startup"
+        )
+
+    constraint_tables = sorted({table for table, _ in REQUIRED_CONSTRAINTS})
+    constraint_rows: list[Mapping[str, str]] = await conn.fetch(
+        """
+        SELECT table_name, constraint_name
+        FROM information_schema.table_constraints
+        WHERE table_schema = 'public' AND table_name = ANY($1::text[])
+        """,
+        constraint_tables,
+    )
+    available_constraints = {
+        (row["table_name"], row["constraint_name"]) for row in constraint_rows
+    }
+    missing_constraints = sorted(REQUIRED_CONSTRAINTS - available_constraints)
+    if missing_constraints:
+        formatted = ", ".join(
+            f"{table}.{constraint}" for table, constraint in missing_constraints
+        )
+        raise RuntimeError(
+            f"Codegen PostgreSQL schema constraints are incomplete ({formatted}); "
+            "restore the database or apply migrations before startup"
+        )
+
+    trigger_tables = sorted({table for table, _ in REQUIRED_TRIGGERS})
+    trigger_rows: list[Mapping[str, str]] = await conn.fetch(
+        """
+        SELECT event_object_table AS table_name, trigger_name
+        FROM information_schema.triggers
+        WHERE trigger_schema = 'public'
+          AND event_object_table = ANY($1::text[])
+        """,
+        trigger_tables,
+    )
+    available_triggers = {
+        (row["table_name"], row["trigger_name"]) for row in trigger_rows
+    }
+    missing_triggers = sorted(REQUIRED_TRIGGERS - available_triggers)
+    if missing_triggers:
+        formatted = ", ".join(
+            f"{table}.{trigger}" for table, trigger in missing_triggers
+        )
+        raise RuntimeError(
+            f"Codegen PostgreSQL schema triggers are incomplete ({formatted}); "
+            "restore the database or apply migrations before startup"
+        )
+
+    candidate_update_allowed = await conn.fetchval(
+        """
+        SELECT has_table_privilege(
+            current_user,
+            'public.github_repository_authorization_candidates',
+            'UPDATE'
+        )
+        """
+    )
+    if candidate_update_allowed is not False:
+        raise RuntimeError(
+            "Codegen runtime must not update GitHub repository authorization "
+            "candidates; restore least-privilege grants before startup"
         )

@@ -17,8 +17,11 @@ async def test_execution_capability_exposes_operator_policy_and_codegen_authorit
 ) -> None:
     monkeypatch.setenv("AGENTS_ENABLE_AUTONOMOUS_MUTATIONS", "true")
 
-    async def available(project_id: str) -> str:
+    async def available(project_id: str, delegated_headers: dict[str, str]) -> str:
         assert project_id == "demo"
+        assert delegated_headers == {
+            "X-API-Key": "proj_demo_0123456789abcdef"
+        }
         return "available"
 
     monkeypatch.setattr(capabilities, "codegen_changeset_capability", available)
@@ -29,6 +32,7 @@ async def test_execution_capability_exposes_operator_policy_and_codegen_authorit
         response = await client.get(
             "/v1/agents/capabilities/execution",
             params={"project_id": "demo"},
+            headers={"X-API-Key": "proj_demo_0123456789abcdef"},
         )
 
     assert response.status_code == 200
@@ -46,7 +50,13 @@ async def test_execution_capability_is_approval_only_and_codegen_fail_closed(
 ) -> None:
     monkeypatch.delenv("AGENTS_ENABLE_AUTONOMOUS_MUTATIONS", raising=False)
 
-    async def unavailable(_project_id: str) -> str:
+    async def unavailable(
+        _project_id: str,
+        delegated_headers: dict[str, str],
+    ) -> str:
+        assert delegated_headers == {
+            "X-API-Key": "proj_demo_0123456789abcdef"
+        }
         return "unavailable"
 
     monkeypatch.setattr(capabilities, "codegen_changeset_capability", unavailable)
@@ -57,6 +67,7 @@ async def test_execution_capability_is_approval_only_and_codegen_fail_closed(
         response = await client.get(
             "/v1/agents/capabilities/execution",
             params={"project_id": "demo"},
+            headers={"X-API-Key": "proj_demo_0123456789abcdef"},
         )
 
     assert response.status_code == 200

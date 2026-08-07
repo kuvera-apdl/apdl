@@ -22,7 +22,7 @@ from urllib.parse import quote
 import httpx
 import jwt
 
-from app.config import github_api_url, github_app_id, github_app_private_key
+from app.config import GITHUB_API_URL, github_app_id, github_app_private_key
 from app.github.client import gh_client, gh_headers
 
 logger = logging.getLogger(__name__)
@@ -57,7 +57,9 @@ CODEGEN_PR_WRITE_PERMISSIONS: Mapping[str, str] = MappingProxyType(
         "pull_requests": "write",
     }
 )
-_DISCOVERY_PERMISSIONS: Mapping[str, str] = MappingProxyType({"metadata": "read"})
+CODEGEN_METADATA_PERMISSIONS: Mapping[str, str] = MappingProxyType(
+    {"metadata": "read"}
+)
 
 
 def _positive_github_id(value: object, *, field: str) -> int:
@@ -146,7 +148,7 @@ def _raw_issued_token(data: object) -> str | None:
 
 async def _revoke_token_with_client(token: str, client: httpx.AsyncClient) -> None:
     response = await client.delete(
-        f"{github_api_url()}/installation/token",
+        f"{GITHUB_API_URL}/installation/token",
         headers=gh_headers(token),
     )
     response.raise_for_status()
@@ -174,6 +176,7 @@ def _permission_payload(permissions: Mapping[str, str]) -> dict[str, str]:
         dict(CODEGEN_READ_PERMISSIONS),
         dict(CODEGEN_WRITE_PERMISSIONS),
         dict(CODEGEN_PR_WRITE_PERMISSIONS),
+        dict(CODEGEN_METADATA_PERMISSIONS),
     ):
         raise ValueError("permissions must be an exact codegen permission profile")
     return requested
@@ -238,7 +241,7 @@ async def _mint_token_for_repository(
     resolved_key = private_key_pem or github_app_private_key()
     app_jwt = build_app_jwt(resolved_app_id, resolved_key)
 
-    url = f"{github_api_url()}/app/installations/{target.installation_id}/access_tokens"
+    url = f"{GITHUB_API_URL}/app/installations/{target.installation_id}/access_tokens"
     async with gh_client(client, timeout=15.0) as c:
         resp = await c.post(
             url,
@@ -317,7 +320,7 @@ async def resolve_repository_target(
 
     async with gh_client(client, timeout=15.0) as c:
         installation_resp = await c.get(
-            f"{github_api_url()}/repos/{encoded_repo}/installation",
+            f"{GITHUB_API_URL}/repos/{encoded_repo}/installation",
             headers=gh_headers(app_jwt),
         )
         installation_resp.raise_for_status()
@@ -329,11 +332,11 @@ async def resolve_repository_target(
         )
 
         token_resp = await c.post(
-            f"{github_api_url()}/app/installations/{installation_id}/access_tokens",
+            f"{GITHUB_API_URL}/app/installations/{installation_id}/access_tokens",
             headers=gh_headers(app_jwt),
             json={
                 "repositories": [name],
-                "permissions": dict(_DISCOVERY_PERMISSIONS),
+                "permissions": dict(CODEGEN_METADATA_PERMISSIONS),
             },
         )
         token_resp.raise_for_status()
@@ -341,7 +344,9 @@ async def resolve_repository_target(
         try:
             if not isinstance(token_data, dict):
                 raise ValueError("GitHub installation-token response must be an object")
-            if _returned_permissions(token_data) != dict(_DISCOVERY_PERMISSIONS):
+            if _returned_permissions(token_data) != dict(
+                CODEGEN_METADATA_PERMISSIONS
+            ):
                 raise ValueError("GitHub discovery token returned unexpected permissions")
             repositories = token_data.get("repositories")
             if not isinstance(repositories, list) or len(repositories) != 1:
@@ -364,7 +369,7 @@ async def resolve_repository_target(
                 )
             discovery_token = _parse_token(token_data)
             metadata_resp = await c.get(
-                f"{github_api_url()}/repos/{encoded_repo}",
+                f"{GITHUB_API_URL}/repos/{encoded_repo}",
                 headers=gh_headers(discovery_token.token),
             )
             metadata_resp.raise_for_status()

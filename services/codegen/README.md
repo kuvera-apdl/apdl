@@ -1,10 +1,11 @@
 # Codegen Service
 
 FastAPI service (`:8084`, private service network only) — the
-autonomous-development "hands" of APDL. It works only in operator-granted
-customer repositories and produces **changesets** (branch + commits + pull
-request). GitHub is the sole authority for CI verification, review rules, and
-merge. APDL observes those results and may push bounded repair commits.
+autonomous-development "hands" of APDL. It works only in customer repositories
+connected to an APDL project through the GitHub App and produces **changesets**
+(branch + commits + pull request). GitHub is the sole authority for CI
+verification, review rules, and merge. APDL observes those results and may push
+bounded repair commits.
 
 Orchestration, autonomy gating, safety validation, and human approvals live in
 the **agents service** (`:8083`), which calls this service over the internal
@@ -56,14 +57,22 @@ protection metadata, and truncated snapshots are returned as explicit
 
 ## API
 
-All `/v1` endpoints require the canonical `X-API-Key`. Codegen derives the
-project and roles from PostgreSQL and independently checks every body, query,
-path, and changeset-owned project. There is no permissive or global internal
-bearer token. A project-scoped credential is not repository authority: only an
-active operator-verified grant can authorize GitHub access.
+All `/v1` endpoints require exactly one authority header: the canonical
+`X-API-Key`, or a private `X-APDL-Internal-Capability` minted just in time for
+one live Agents execution. Codegen derives the project and roles from
+PostgreSQL and independently checks every body, query, path, and
+changeset-owned project. Internal mutation capabilities are short-lived,
+request-bound, and consumed atomically; there is no permissive or global
+internal bearer token. Project authority is not repository authority: only an
+active grant backed by a GitHub user's repository-admin proof can authorize
+GitHub access.
 
 | Method | Path | Purpose |
 |---|---|---|
+| POST | `/v1/github/repository-authorizations` | Start a project-scoped GitHub App installation and user-authorization flow |
+| GET | `/github/repository-authorization/callback` | Consume one GitHub setup/OAuth callback and return only a trusted redirect |
+| GET | `/v1/github/repository-authorizations/{authorization_id}?project_id=...` | Read the caller-owned short-lived authorization and server-discovered repository choices |
+| POST | `/v1/github/repository-authorizations/{authorization_id}/complete` | Bind one opaque repository candidate to the project |
 | GET | `/v1/connections/{project_id}` | Read the active grant projection (`grant_id`, immutable `repository_id`, display-only `repository_full_name`) |
 | GET | `/v1/connections/{project_id}/tenant-policy` | Read the strict tenant-owned Codegen preferences |
 | PUT | `/v1/connections/{project_id}/tenant-policy` | Replace tenant preferences (tightening only) |
@@ -82,13 +91,15 @@ active operator-verified grant can authorize GitHub access.
 | POST | `/v1/changesets/{id}/abandon` | Abandon queued pre-PR work |
 | POST | `/v1/changesets/{id}/retry` | Retry an eligible failed changeset after rechecking capability |
 | POST | `/v1/changesets/{id}/revert` | Enqueue a revert changeset after rechecking capability |
-| POST | `/webhooks/github` | HMAC-verified recovery trigger (`pull_request`, `check_run`, `check_suite`, `status`) |
+| POST | `/webhooks/github` | Optional HMAC-verified recovery trigger (`pull_request`, `check_run`, `check_suite`, `status`) |
 | GET | `/health`, `/ready` | Liveness / PostgreSQL readiness |
 
-`/webhooks/github` is the only route outside the project API-key boundary. It
-always requires `X-Hub-Signature-256` verified with `GITHUB_WEBHOOK_SECRET`.
-When the secret is unset, the endpoint returns `503` before parsing or queuing
-the payload; the service, health checks, and CI poller continue to operate.
+Two GitHub ingress routes sit outside the project API-key boundary. The
+short-lived `/github/repository-authorization/callback` accepts only a one-time
+state-bound GitHub setup or OAuth response. `/webhooks/github` is enabled only
+when `GITHUB_WEBHOOK_SECRET` is configured; enabled requests always require an
+`X-Hub-Signature-256` HMAC. Without a secret the route returns `503` before
+parsing or routing the payload.
 
 Create, retry, and revert synchronously re-evaluate the same project capability
 before writing a new changeset. This is an intentional API change: a project
@@ -105,23 +116,57 @@ a fresh probe.
 
 ## Repository authority
 
-Repository onboarding is an operator-only control-plane operation. Tenant API
-keys and Admin browser sessions cannot enumerate repositories reachable by the
-shared GitHub App, submit an installation ID, or activate a grant. The operator
-verifies the exact GitHub repository and records one canonical grant containing:
+Repository onboarding is a project-scoped, user-authorized GitHub App flow.
+The project owner, or a member delegated both `agents:manage` and
+`credentials:manage`, starts the flow in Admin. After installing or configuring
+the App, the same flow obtains a short-lived GitHub App user token and discovers
+only repositories that are both exposed to this App and administered by that
+GitHub user. The token is revoked after discovery and is never persisted.
+
+The setup callback's `installation_id`, repository slugs, and arbitrary numeric
+repository IDs are never accepted from the browser as authority. Codegen rotates
+a one-time hashed state before OAuth, and the Admin callback relay binds both
+legs to the initiating browser with a short-lived, callback-scoped `HttpOnly`
+cookie. The user OAuth leg uses S256 PKCE. Codegen then verifies the
+authenticated GitHub user, stores server-discovered choices behind opaque
+candidate IDs, and records one canonical grant containing:
 
 - the APDL `project_id`;
 - the internal GitHub App `installation_id`;
 - GitHub's immutable numeric `repository_id`;
 - `repository_full_name`, retained only as a display and clone locator;
-- grant status and operator audit metadata.
+- grant status plus the APDL and GitHub user evidence that authorized it.
 
-The tenant API has no connection-creation route. The public read-only connection
-contract contains `grant_id`, `repository_id`, and `repository_full_name`; it
-never exposes `installation_id` and never treats the repository name as
-authority. Repository renames may update the display name only when the numeric
-ID is unchanged. A transfer, deletion, installation change, revocation, or ID
-mismatch fails closed and requires operator reauthorization.
+If GitHub reports `state` plus `setup_action=request`, the organization requires
+an owner to approve the App. Codegen consumes and deletes that one-time flow,
+does not advance to OAuth, and redirects Admin with the strict
+`installation_approval_required` status and the canonical project ID. A
+successful OAuth callback likewise redirects with both the opaque authorization
+ID and canonical project ID. Admin accepts that project context only when it is
+present in the signed-in user's workspace list, switches to it before querying,
+and never treats a callback parameter as repository authority.
+
+Candidate rows are immutable and the Codegen runtime has no `UPDATE` privilege
+on them. After live GitHub revalidation, completion locks the selected row and
+compares every stored repository coordinate with that verified snapshot before
+revoking or replacing the current connection. A changed or delete-and-reinserted
+candidate fails with a conflict and leaves the existing connection untouched.
+
+Migration `059_github_repository_user_authorization.sql` does not infer this
+evidence for rows created by earlier migrations. Any pre-existing grant carrying
+the old `github_oauth` label is relabeled `legacy_unverified` and terminally
+revoked because it has no recorded APDL actor or immutable GitHub user ID. Such
+a grant cannot authorize Codegen work. The project owner must reconnect the
+repository through the Admin GitHub App flow; there is no evidence backfill or
+operator override that reactivates the quarantined row.
+
+The browser completes a connection using only the project ID, authorization ID,
+and opaque candidate ID. The public connection contract contains `grant_id`,
+`repository_id`, and `repository_full_name`; it never exposes `installation_id`
+and never treats the repository name as authority. Repository renames may update
+the display name only when the numeric ID is unchanged. A transfer, deletion,
+installation change, revocation, or ID mismatch fails closed and requires a new
+user authorization.
 
 Every changeset snapshots its grant and immutable repository target. Before a
 clone, push, PR mutation, poll, or repair, Codegen checks that the snapshot still
@@ -131,9 +176,8 @@ set; a token response that does not match the requested repository and
 permissions is rejected. Rebinding a project therefore cannot retarget queued
 or open work.
 
-The operator workflow is intentionally local to the trusted Codegen control
-plane rather than exposed as a tenant HTTP endpoint. From the repository root,
-run:
+The local operator command remains a break-glass provisioning path for trusted
+deployments without Admin user onboarding. From the repository root, run:
 
 ```bash
 make grant-codegen-repository \
@@ -163,8 +207,10 @@ while an editor operation is already in flight, suspend or uninstall the GitHub
 App installation on GitHub as well; GitHub controls the validity of a token it
 already issued.
 
-Existing legacy repository/installation rows are not proof of ownership and
-must not be automatically promoted to active grants.
+Only an active repository grant is proof of authority. Repository or
+installation metadata alone must never be promoted into authority. Connecting a
+repository also does not create the separate project execution authorization
+used to gate effectful autonomous runs.
 
 ## Changeset lifecycle
 
@@ -187,12 +233,23 @@ Transitions are enforced by `app/models/changeset.py`; illegal moves raise
 
 ## Environment
 
+The GitHub integration targets GitHub.com and has one canonical configuration.
+The six App/OAuth `GITHUB_*` values below are always required. Register the
+callback value exactly as both the App setup URL and OAuth callback URL.
+`GITHUB_WEBHOOK_SECRET` may be blank only while CI polling is positive; blank
+disables inbound webhooks. Setting `CODEGEN_CI_POLL_INTERVAL=0` requires a
+valid webhook secret.
+
 ```
 POSTGRES_URL=postgresql://apdl_runtime:apdl_runtime_dev@localhost:5432/apdl
 GITHUB_APP_ID=
 GITHUB_APP_PRIVATE_KEY_BASE64=     # standard Base64 of the UTF-8 PEM
-GITHUB_API_URL=https://api.github.com
-GITHUB_WEBHOOK_SECRET=             # required to enable /webhooks/github; empty returns 503
+GITHUB_APP_SLUG=
+GITHUB_APP_CLIENT_ID=
+GITHUB_APP_CLIENT_SECRET=
+GITHUB_APP_CALLBACK_URL=http://localhost:5173/api/github/codegen/callback
+GITHUB_WEBHOOK_SECRET=
+CODEGEN_CI_POLL_INTERVAL=60       # 0 requires GITHUB_WEBHOOK_SECRET
 LLM_VAULT_URL=http://localhost:8086
 LLM_VAULT_CODEGEN_TOKEN=           # Codegen-only JIT credential access token
 LLM_VAULT_PROJECTION_TOKEN=        # vault-to-Codegen model projection token
@@ -228,6 +285,18 @@ access to `.env` like the original PEM and never commit either one. This is a
 breaking configuration change; deployments that previously supplied an inline
 PEM or a PEM file path must encode the file and migrate to the single setting
 above.
+
+When enabling the webhook, generate its signing secret independently:
+
+```bash
+openssl rand -hex 32
+```
+
+With the default positive polling interval, leaving
+`GITHUB_WEBHOOK_SECRET` blank disables inbound webhooks and retains polling as
+the recovery path. Configure a valid secret to run polling and webhooks
+together. Set `CODEGEN_CI_POLL_INTERVAL=0` only after configuring the secret;
+that makes webhooks the sole CI recovery path.
 
 Generate the Codegen credential-encryption key independently from every provider
 credential and keep it in the deployment secret manager:
@@ -577,11 +646,16 @@ The autonomous loop runs once these external pieces are set up:
    or merge. Existing installations must approve the added permission before
    runtime evidence can be collected; until then it remains explicitly
    unverified. Set
-   `GITHUB_APP_ID` + `GITHUB_APP_PRIVATE_KEY_BASE64`. Customers install it on their
-   repos; a trusted operator then binds each exact repository with
-   `make grant-codegen-repository` as described in
+   `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY_BASE64`, `GITHUB_APP_SLUG`,
+   `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET`,
+   and `GITHUB_APP_CALLBACK_URL`. Configure the callback URL as both the GitHub
+   App setup URL and an OAuth callback URL.
+   Leave GitHub's automatic "Request user authorization (OAuth) during
+   installation" option disabled; APDL starts its own state-bound OAuth leg
+   after setup. Customers install the App and connect an exact repository from
+   the project's Admin Codegen page as described in
    [Repository authority](#repository-authority). Never provision a repository
-   through a tenant API key or an unverified installation ID.
+   from an unverified installation ID.
 2. **Provision the coding agent.** Make `aider` available where
    the editor runs
    — `uv pip install -e ".[agent]"` on the codegen host for v1, or build the
@@ -591,10 +665,12 @@ The autonomous loop runs once these external pieces are set up:
    validate it with `make codegen-tenant-config`, and start it with
    `make codegen-tenant-up`. Optionally set each repo's test command through
    connection `tenant_policy.test_cmd` (otherwise it is auto-detected).
-3. **Add a repo webhook** → configure a non-empty `GITHUB_WEBHOOK_SECRET`, then
-   point GitHub at `POST /webhooks/github` with events `pull_request`,
-   `check_run`, `check_suite`, and `status`. An unset secret disables the
-   endpoint; polling remains the recovery path for disabled or missed deliveries.
+3. **Optionally configure the App webhook** → point GitHub at
+   `POST /webhooks/github`, configure the same `GITHUB_WEBHOOK_SECRET` on both
+   sides, and subscribe to `pull_request`, `check_run`, `check_suite`, and
+   `status`. Leave polling positive as recovery for missed deliveries, or set
+   `CODEGEN_CI_POLL_INTERVAL=0` only when the webhook secret is configured and
+   webhooks will be the sole recovery path.
 4. **Enable GitHub branch protection/rulesets** on the default branch (require PR,
    reviews, and green checks). GitHub is the enforcement and merge authority.
 

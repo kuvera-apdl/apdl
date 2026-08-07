@@ -58,7 +58,7 @@ async def test_paginated_items_rejects_an_off_origin_next_link_before_forwarding
         )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        with pytest.raises(ValueError, match="configured API host"):
+        with pytest.raises(ValueError, match="canonical API host"):
             await github_paginated_items(
                 client,
                 "https://api.github.com/resource?page=1",
@@ -80,7 +80,7 @@ async def test_paginated_items_rejects_an_off_origin_initial_url_without_a_reque
         return httpx.Response(200, json={"items": []})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        with pytest.raises(ValueError, match="configured API host"):
+        with pytest.raises(ValueError, match="canonical API host"):
             await github_paginated_items(
                 client,
                 "https://attacker.example/resource?page=1",

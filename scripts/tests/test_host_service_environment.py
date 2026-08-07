@@ -32,10 +32,15 @@ VAULT_AGENTS_TOKEN = "LLM_VAULT_AGENTS_TOKEN"
 VAULT_CODEGEN_TOKEN = "LLM_VAULT_CODEGEN_TOKEN"
 VAULT_PROJECTION_TOKEN = "LLM_VAULT_PROJECTION_TOKEN"
 VAULT_DB_PASSWORD = "APDL_LLM_VAULT_POSTGRES_PASSWORD"
+AGENTS_DB_PASSWORD = "APDL_AGENTS_POSTGRES_PASSWORD"
+RUNTIME_DB_PASSWORD = "APDL_RUNTIME_POSTGRES_PASSWORD"
 GITHUB_PRIVATE_KEY = "GITHUB_APP_PRIVATE_KEY_BASE64"
 GITHUB_WEBHOOK_SECRET = "GITHUB_WEBHOOK_SECRET"
 
 FILE_SECRETS = {
+    "APDL_SERVICE_API_KEYS": "file-admin-service-key-map-sentinel",
+    RUNTIME_DB_PASSWORD: "file-runtime-db-password-sentinel",
+    AGENTS_DB_PASSWORD: "file-agents-db-password-sentinel",
     VAULT_KEY: "file-vault-platform-secret-sentinel",
     VAULT_ADMIN_TOKEN: "file-vault-admin-token-sentinel",
     VAULT_AGENTS_TOKEN: "file-vault-agents-token-sentinel",
@@ -75,6 +80,7 @@ CHILD = """
 import json
 import os
 import sys
+from urllib.parse import urlsplit
 
 interesting = sorted(
     name
@@ -83,6 +89,9 @@ interesting = sorted(
         name.endswith("_API_KEY")
         or "LLM_CREDENTIAL" in name
         or name.startswith("LLM_VAULT_")
+        or name == "APDL_SERVICE_API_KEYS"
+        or name == "APDL_AGENTS_POSTGRES_PASSWORD"
+        or name == "APDL_RUNTIME_POSTGRES_PASSWORD"
         or name == "APDL_LLM_VAULT_POSTGRES_PASSWORD"
         or name in {"GITHUB_APP_PRIVATE_KEY_BASE64", "GITHUB_WEBHOOK_SECRET"}
     )
@@ -90,6 +99,8 @@ interesting = sorted(
 secret_values = [os.environ[name] for name in interesting if os.environ[name]]
 print(json.dumps({
     "names": interesting,
+    "postgres_user": urlsplit(os.environ["POSTGRES_URL"]).username
+        if "POSTGRES_URL" in os.environ else None,
     "secret_value_in_argv": any(
         value in argument
         for value in secret_values
@@ -130,6 +141,7 @@ class HostServiceEnvironmentTests(unittest.TestCase):
             for service in SERVICES
         }
         expected["admin-api"] = {VAULT_ADMIN_TOKEN}
+        expected["admin-api"].add("APDL_SERVICE_API_KEYS")
         expected["agents"] = {VAULT_AGENTS_TOKEN, VAULT_PROJECTION_TOKEN}
         expected["codegen"] = {
             VAULT_CODEGEN_TOKEN,
@@ -143,7 +155,6 @@ class HostServiceEnvironmentTests(unittest.TestCase):
             VAULT_AGENTS_TOKEN,
             VAULT_CODEGEN_TOKEN,
             VAULT_PROJECTION_TOKEN,
-            VAULT_DB_PASSWORD,
         }
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -191,12 +202,92 @@ class HostServiceEnvironmentTests(unittest.TestCase):
                     )
                     result = json.loads(completed.stdout)
                     self.assertEqual(set(result["names"]), expected[service])
+                    self.assertEqual(
+                        result["postgres_user"],
+                        {
+                            "agents": "apdl_agents",
+                            "llm-vault": "apdl_llm_vault",
+                        }.get(service),
+                    )
                     self.assertFalse(result["secret_value_in_argv"])
                     for value in ALL_SECRET_VALUES:
                         self.assertNotIn(value, completed.stdout)
                         self.assertNotIn(value, completed.stderr)
 
             self.assertEqual(list(scratch.iterdir()), [])
+
+    def test_agents_rejects_an_ambient_runtime_database_url(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            boundary = Path(temporary)
+            env_file = boundary / "service.env"
+            env_file.write_text(
+                "POSTGRES_URL=postgresql://apdl_runtime:runtime-secret@localhost/apdl\n",
+                encoding="utf-8",
+            )
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(RUNNER),
+                    "--service",
+                    "agents",
+                    "--env-file",
+                    str(env_file),
+                    "--working-directory",
+                    str(ROOT),
+                    "--",
+                    sys.executable,
+                    "-c",
+                    "raise SystemExit('command must not run')",
+                ],
+                env={
+                    "HOME": os.environ.get("HOME", str(boundary)),
+                    "PATH": os.environ.get("PATH", os.defpath),
+                },
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("Agents requires APDL_AGENTS_POSTGRES_PASSWORD", completed.stderr)
+        self.assertNotIn("runtime-secret", completed.stderr)
+
+    def test_llm_vault_rejects_an_ambient_runtime_database_url(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            boundary = Path(temporary)
+            env_file = boundary / "service.env"
+            env_file.write_text(
+                "POSTGRES_URL=postgresql://apdl_runtime:runtime-secret@localhost/apdl\n",
+                encoding="utf-8",
+            )
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(RUNNER),
+                    "--service",
+                    "llm-vault",
+                    "--env-file",
+                    str(env_file),
+                    "--working-directory",
+                    str(ROOT),
+                    "--",
+                    sys.executable,
+                    "-c",
+                    "raise SystemExit('command must not run')",
+                ],
+                env={
+                    "HOME": os.environ.get("HOME", str(boundary)),
+                    "PATH": os.environ.get("PATH", os.defpath),
+                },
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn(
+            "LLM Vault requires APDL_LLM_VAULT_POSTGRES_PASSWORD",
+            completed.stderr,
+        )
+        self.assertNotIn("runtime-secret", completed.stderr)
 
     def test_malformed_environment_file_fails_without_rendering_its_value(self) -> None:
         secret = "malformed-environment-secret-sentinel"

@@ -3,6 +3,11 @@ import { describe, expect, it } from 'vitest'
 import {
   changesetListSchema,
   changesetSchema,
+  githubRepositoryAuthorizationCompleteRequestSchema,
+  githubRepositoryAuthorizationSchema,
+  githubRepositoryAuthorizationStartSchema,
+  githubRepositoryCallbackStatusSchema,
+  githubRepositoryProjectIdSchema,
   repoConnectionSchema,
   tenantCodegenConnectionPolicySchema,
 } from '@/api/schemas/codegen'
@@ -85,6 +90,75 @@ describe('codegen schemas', () => {
     'not-a-url',
   ])('rejects an unsafe rendered pull-request URL: %s', (prUrl) => {
     expect(changesetSchema.safeParse({ ...sample, pr_url: prUrl }).success).toBe(false)
+  })
+
+  it('enforces strict project-scoped GitHub repository authorization contracts', () => {
+    const authorizationId = '10000000-0000-4000-8000-000000000001'
+    const candidate = {
+      candidate_id: '20000000-0000-4000-8000-000000000002',
+      repository_id: 123456,
+      repository_full_name: 'acme/widgets',
+      default_base_branch: 'main',
+      private: true,
+    }
+    const start = {
+      schema_version: 'github_repository_authorization_start@1',
+      authorization_id: authorizationId,
+      installation_url: 'https://github.com/apps/apdl/installations/new?state=opaque',
+      expires_at: '2026-08-03T18:00:00Z',
+    }
+    const selection = {
+      schema_version: 'github_repository_authorization@1',
+      authorization_id: authorizationId,
+      project_id: 'demo',
+      status: 'awaiting_selection',
+      repositories: [candidate],
+      expires_at: '2026-08-03T18:00:00Z',
+    }
+
+    expect(githubRepositoryAuthorizationStartSchema.safeParse(start).success).toBe(true)
+    expect(githubRepositoryAuthorizationSchema.safeParse(selection).success).toBe(true)
+    expect(githubRepositoryAuthorizationSchema.safeParse({
+      ...selection,
+      repositories: [],
+    }).success).toBe(true)
+    expect(githubRepositoryAuthorizationSchema.safeParse({
+      ...selection,
+      status: 'awaiting_oauth',
+      repositories: [],
+    }).success).toBe(true)
+    expect(githubRepositoryAuthorizationCompleteRequestSchema.safeParse({
+      project_id: 'demo',
+      candidate_id: candidate.candidate_id,
+    }).success).toBe(true)
+    expect(githubRepositoryProjectIdSchema.safeParse('demo').success).toBe(true)
+    expect(
+      githubRepositoryCallbackStatusSchema.safeParse('installation_approval_required').success,
+    ).toBe(true)
+
+    expect(githubRepositoryAuthorizationStartSchema.safeParse({
+      ...start,
+      installation_url: 'javascript:alert(1)',
+    }).success).toBe(false)
+    expect(githubRepositoryAuthorizationSchema.safeParse({
+      ...selection,
+      status: 'awaiting_oauth',
+    }).success).toBe(false)
+    expect(githubRepositoryAuthorizationSchema.safeParse({
+      ...selection,
+      repositories: [candidate, candidate],
+    }).success).toBe(false)
+    expect(githubRepositoryAuthorizationSchema.safeParse({
+      ...selection,
+      installation_id: 42,
+    }).success).toBe(false)
+    expect(githubRepositoryAuthorizationCompleteRequestSchema.safeParse({
+      project_id: 'demo',
+      candidate_id: candidate.candidate_id,
+      repository_id: candidate.repository_id,
+    }).success).toBe(false)
+    expect(githubRepositoryProjectIdSchema.safeParse('demo/other').success).toBe(false)
+    expect(githubRepositoryCallbackStatusSchema.safeParse('approved').success).toBe(false)
   })
 
   it('parses strict tenant policy provenance', () => {

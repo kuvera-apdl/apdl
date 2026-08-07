@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import re
 from typing import Literal
 from urllib.parse import quote
 
@@ -12,9 +11,6 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationErro
 
 CONFIG_SERVICE_URL = os.getenv("CONFIG_SERVICE_URL", "http://localhost:8081")
 _TIMEOUT_SECONDS = 5.0
-_API_KEY_PATTERN = re.compile(
-    r"^proj_(?P<project_id>[A-Za-z0-9]{1,64})_[A-Za-z0-9]{16,128}$"
-)
 _RESOURCE_KEY_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
 
 
@@ -135,13 +131,15 @@ def _config_error_detail(response: httpx.Response, fallback: str) -> str:
 async def fetch_experiment_analysis(
     project_id: str,
     experiment_key: str,
-    api_key: str,
+    delegated_headers: dict[str, str],
 ) -> ConfigExperimentAnalysis:
     """Resolve one experiment using the already-verified caller credential."""
-    match = _API_KEY_PATTERN.fullmatch(api_key)
-    if match is None or match.group("project_id") != project_id:
+    if set(delegated_headers) not in (
+        {"X-API-Key"},
+        {"X-APDL-Internal-Capability"},
+    ):
         raise ConfigServiceUnavailable(
-            "Validated project credential is unavailable for Config delegation"
+            "Validated authority is unavailable for Config delegation"
         )
 
     path = f"/v1/experiments/{quote(experiment_key, safe='')}/analysis"
@@ -149,7 +147,7 @@ async def fetch_experiment_analysis(
         async with httpx.AsyncClient(
             base_url=CONFIG_SERVICE_URL,
             timeout=_TIMEOUT_SECONDS,
-            headers={"X-API-Key": api_key},
+            headers=delegated_headers,
         ) as client:
             response = await client.get(path)
     except httpx.RequestError as exc:

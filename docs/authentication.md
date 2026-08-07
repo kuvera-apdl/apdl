@@ -1,6 +1,7 @@
 # Authentication and tenant authorization
 
-APDL has two strict credential kinds. Send either one only in `X-API-Key`:
+APDL exposes two strict API-key credential kinds. External callers send either
+one only in `X-API-Key`:
 
 ```text
 proj_{project_id}_{secret}     # confidential service credential
@@ -57,14 +58,47 @@ Every authorized mutation is attributed to the human user in
 `admin_proxy_audit`; the audit stores route metadata and status, never request
 bodies or credentials.
 
-Project authorization does not imply GitHub repository ownership. Codegen
-accepts no tenant-supplied repository or GitHub App installation coordinates.
-A trusted operator must separately activate a grant binding the APDL project to
-GitHub's immutable numeric repository ID. Admin exposes only the read-only grant
-projection (`grant_id`, `repository_id`, and display-only
-`repository_full_name`); the installation ID remains inside the trusted
-Codegen control plane. Every GitHub token lease revalidates that grant and uses
-an operation-specific token restricted to the immutable repository ID.
+Project authorization does not imply GitHub repository authority. A project
+owner, or a member delegated both `agents:manage` and `credentials:manage`, must
+complete a project-scoped GitHub App user-authorization flow. The browser never
+submits repository or installation coordinates as authority: Codegen uses the
+authenticated GitHub user's short-lived token to discover only App-visible
+repositories the user administers, persists opaque candidates, and revokes the
+token after discovery. The callback relay binds the setup and OAuth legs to the
+initiating browser with a short-lived `HttpOnly` cookie, rotates the one-time
+state between legs, and requires S256 PKCE. Completing a candidate creates the
+grant that binds the APDL project to GitHub's immutable numeric repository ID.
+An organization approval request consumes the pending setup state without
+starting OAuth and returns a project-scoped approval-required status. Successful
+callbacks include Codegen's canonical project ID; Admin validates it against the
+signed-in user's workspace list before switching or issuing an authorization
+query. Recoverable callback failures clear the correlation cookie and expose
+only the fixed `authorization_failed` UI status.
+
+Admin exposes only the grant projection (`grant_id`, `repository_id`, and
+display-only `repository_full_name`); the installation ID remains inside the
+trusted Codegen control plane. Every GitHub token lease revalidates the active,
+same-project grant and uses an operation-specific token restricted to that
+immutable repository ID. Repository connection does not grant the separate
+project execution authority required for effectful autonomous runs.
+
+### Canonical GitHub App configuration
+
+APDL supports one GitHub.com setup. Configure these six required App/OAuth values:
+`GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY_BASE64`, `GITHUB_APP_SLUG`,
+`GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET`,
+and `GITHUB_APP_CALLBACK_URL`. Register the exact
+`GITHUB_APP_CALLBACK_URL` as both the App setup URL and OAuth callback URL. Keep
+GitHub's automatic **Request user authorization (OAuth) during installation**
+option disabled because APDL starts the state-bound OAuth leg itself after the
+setup callback. For local development the canonical callback is
+`http://localhost:5173/api/github/codegen/callback`.
+
+`GITHUB_WEBHOOK_SECRET` is conditional. Leaving it blank disables inbound
+webhooks and is valid only while `CODEGEN_CI_POLL_INTERVAL` is positive (the
+default is 60 seconds). Setting the polling interval to `0` requires a valid
+webhook secret so Codegen retains a GitHub CI recovery source. Generate the
+secret with `openssl rand -hex 32`.
 
 `POST /api/auth/register` accepts one strict `{email, password}` contract. It
 creates the user and session in one transaction, but deliberately creates no
@@ -162,23 +196,25 @@ for the upstream call and the row is deleted after the response or SSE stream
 closes. This keeps self-created projects usable without exposing a persistent
 service credential to the browser or storing a recoverable key.
 
-Agents and Codegen execution requires a canonical
+Effectful Agents and Codegen execution requires a canonical
 `admin_project_execution_authorizations` row. Migration 028 backfills and
 automatically records `operator_provisioned` authority only for projects whose
 immutable `admin_projects.created_by` is null. Self-created projects retain
 `agents:read` by default. An operator may authorize one deliberately with the
 `self_registered_override` source, a non-empty actor, reason, and timestamp.
 Agents and Codegen independently load that record, while PostgreSQL rejects
-execution roles and inserts into registered execution-bearing tables when it
-is absent.
+`agents:approve` and inserts into registered effect-bearing tables when it is
+absent. Governed analysis uses `agents:run`/`agents:manage`, requires active
+owner-controlled Agents setup, and cannot mint downstream mutation authority.
 
-Experiment analysis uses synchronous credential delegation: after Query has
-authenticated a confidential `X-API-Key` and enforced `query:read` for its
-project, it forwards that same header to Config's read-only analysis
-projection. Config independently reauthenticates the credential and derives
-the tenant only from it. Query never accepts or selects a second Config key;
-the Admin API keeps an ephemeral proxy credential alive until the nested
-Query-to-Config request and outer response both complete.
+Experiment analysis uses synchronous authority delegation. After Query has
+authenticated either a confidential `X-API-Key` or a Query-and-Config internal
+capability and enforced `query:read`, it forwards that exact header to Config's
+read-only analysis projection. Config independently reauthenticates it and
+derives the tenant only from the verified record. Query never accepts or
+selects a second Config key. For an Admin request, the Admin API keeps its
+ephemeral proxy credential alive until the nested Query-to-Config request and
+outer response both complete.
 
 `make create-admin-user` remains the operator-only bootstrap and recovery path.
 Reprovisioning an existing email rotates its password and revokes active
@@ -189,7 +225,7 @@ requires all three explicit options:
 make create-admin-user ARGS="\
   --email operator@example.com \
   --project-id acme \
-  --roles agents:manage \
+  --roles agents:approve \
   --allow-self-registered-execution \
   --override-actor operator@example.com \
   --override-reason 'Approved production automation boundary'"
@@ -214,10 +250,55 @@ roles and revoking credentials.
 | `agents:approve` | Approve or reject gated agent actions |
 | `credentials:manage` | Human-only creation, rotation, revocation, and audit of restricted SDK credentials |
 
-The three Agents execution roles are valid only for operator-provisioned or
-explicitly authorized self-created projects. Unauthorized self-created
-projects are restricted to `agents:read` at membership, credential,
-service-authorization, and execution-storage boundaries.
+Self-created projects begin with `agents:read`. Owner activation of governed
+setup may add `agents:run` and `agents:manage` for L1/L2 analysis.
+`agents:approve`, Codegen, and external effects remain valid only for
+operator-provisioned or explicitly authorized self-created projects.
+
+## Agents execution capabilities
+
+`admin_projects` is the durable project identity, and
+`admin_project_execution_authorizations` records whether that project may run
+effectful Agents or Codegen work. APDL does not create another project secret or
+capability when a project is initialized. Such a credential would become
+ambient project authority and could outlive the run that needed it.
+
+Instead, a live Agents worker connects to PostgreSQL as the dedicated
+non-owner `apdl_agents` identity. Immediately before one leased `agent_run`,
+`custom_agent_test`, or `approval_effect` makes an internal HTTP call, Agents
+mints a random 60-second token and inserts only its SHA-256 hash into
+`agent_service_capabilities`. The row binds the authority to the exact project,
+execution and run IDs, lease owner, target audiences, canonical roles, and
+expiry. A mutation row additionally stores a SHA-256 binding over the uppercase
+method, exact path, canonical JSON body, and hashed `Idempotency-Key`. The raw
+token exists only in process memory and the
+`X-APDL-Internal-Capability` request header; Agents deletes the row when the
+call ends, with expiry as the cleanup fallback.
+
+Config, Query, and Codegen independently hash the presented token, require
+their audience and the route's role, and revalidate the referenced durable
+execution and live lease. Codegen also rechecks project execution
+authorization. The `config:write` and `agents:manage` roles can be issued only
+for a leased approval effect; ordinary runs and tests receive read or
+server-side evaluation authority. Config rejects internal
+capabilities on its long-lived SSE stream, and every service rejects requests
+that combine `X-API-Key` with `X-APDL-Internal-Capability`.
+
+Config and Codegen recompute the mutation request binding, revalidate the live
+approval-effect lease, and atomically set `consumed_at` through one narrowly
+owned `SECURITY DEFINER` routine. A mismatch, replay, expired token, or
+future-issued token fails closed. Read/query capabilities remain reusable only
+within their short lifetime so Query can delegate the same verified authority
+to Config's read-only experiment projection.
+
+The capability therefore serves both purposes without conflating them: its
+stored project binding identifies the tenant for the one call, while its
+audience, roles, and live execution binding prove the limited authority being
+delegated. It is not a reusable project API key. The ordinary `apdl_runtime`
+database identity may read capability rows to validate them but cannot insert,
+update, or delete them. Only the Agents issuer identity has exact-column insert
+and delete authority. No login role can update a capability; the non-login
+consume-function owner can update only `consumed_at` through the atomic routine.
 
 ## Operator provision credentials
 
@@ -278,15 +359,18 @@ SQL
 printf 'Browser key (shown once): %s\n' "$client_key"
 ```
 
-Service principals receive only the roles they need. Internal agents read one
-JSON object from `APDL_SERVICE_API_KEYS`, keyed by project, so each automated
-call uses a tenant-scoped credential. Agent-to-Codegen calls use that same
-project scope. Automatic guardrail mutation is disabled in the OSS developer
-preview:
+Service principals receive only the roles they need. `APDL_SERVICE_API_KEYS`
+is an optional Admin API-only map for deployments that choose persistent
+project-scoped proxy credentials instead of the Admin API's per-request
+five-minute credentials:
 
 ```text
 APDL_SERVICE_API_KEYS={"acme":"proj_acme_<secret>"}
 ```
+
+Agents does not read this map. Its Config, Query, and Codegen calls use the
+execution capabilities described above. Automatic guardrail mutation remains
+disabled in the OSS developer preview.
 
 ## Rotation, revocation, and expiry
 
@@ -307,7 +391,9 @@ separate `APDL_SMOKE_CONFIDENTIAL_KEY` and `APDL_SMOKE_BROWSER_KEY` fixtures; it
 first verifies the catalogs are empty, provisions those fixtures with the
 test-only SQL under `scripts/fixtures/`, and destroys the isolated volumes when
 the suite finishes. Production deployments should set
-`APDL_SERVICE_API_KEYS` only to confidential project keys for internal calls,
-set `APDL_ADMIN_COOKIE_SECURE=true`, configure an exact HTTPS origin, disable
-public registration, and provision least-privilege credentials through their
-normal secret-management workflow.
+`APDL_SERVICE_API_KEYS` only on the Admin API and only to confidential project
+keys when persistent proxy credentials are desired. They should also assign a
+unique `APDL_AGENTS_POSTGRES_PASSWORD`, set
+`APDL_ADMIN_COOKIE_SECURE=true`, configure an exact HTTPS origin, disable public
+registration, and provision least-privilege credentials through their normal
+secret-management workflow.

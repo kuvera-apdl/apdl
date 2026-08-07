@@ -142,6 +142,54 @@ async def test_create_get_and_list_changeset():
 
 
 @pytest.mark.asyncio
+async def test_internal_capability_requires_exact_changeset_run_id(
+    authorized_codegen_request,
+):
+    pool = FakePool()
+    pool.add_connection("demo")
+    authorized_codegen_request(
+        "demo",
+        frozenset({"agents:manage"}),
+        auth_kind="internal_capability",
+        capability_run_id="run-bound",
+    )
+
+    async with _client(pool) as client:
+        missing = await client.post(
+            "/v1/changesets",
+            json={
+                "project_id": "demo",
+                "idempotency_key": "test:capability-missing-run",
+                "task": {"title": "x", "spec": "do the thing"},
+            },
+        )
+        mismatched = await client.post(
+            "/v1/changesets",
+            json={
+                "project_id": "demo",
+                "idempotency_key": "test:capability-wrong-run",
+                "run_id": "run-other",
+                "task": {"title": "x", "spec": "do the thing"},
+            },
+        )
+        matched = await client.post(
+            "/v1/changesets",
+            json={
+                "project_id": "demo",
+                "idempotency_key": "test:capability-bound-run",
+                "run_id": "run-bound",
+                "task": {"title": "x", "spec": "do the thing"},
+            },
+        )
+
+    assert missing.status_code == 403
+    assert mismatched.status_code == 403
+    assert matched.status_code == 202
+    assert len(pool.store["changesets"]) == 1
+    assert next(iter(pool.store["changesets"].values()))["run_id"] == "run-bound"
+
+
+@pytest.mark.asyncio
 async def test_create_changeset_is_idempotent_under_concurrent_retries(monkeypatch):
     pool = FakePool()
     pool.add_connection("demo")

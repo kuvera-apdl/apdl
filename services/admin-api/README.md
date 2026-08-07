@@ -52,6 +52,13 @@ every request is authorized against a user, project, and role.
   injecting a server-side API key.
 - Caller-supplied API keys, authorization headers, cookies, internal tokens,
   and project assertions for another tenant are discarded or rejected.
+- The public GitHub App callback accepts only exact setup, approval-request, or
+  OAuth query shapes and binds them to a short-lived `HttpOnly` correlation
+  cookie. Installation and OAuth redirects must use the canonical
+  `https://github.com` origin. Success and approval redirects carry Codegen's
+  canonical project ID; missing, expired, malformed, or untrusted callback
+  results clear the cookie and redirect to the single generic Admin failure
+  status without reflecting upstream details.
 - Uvicorn preserves the socket peer instead of trusting forwarded headers.
   The Admin nginx edge clears `Forwarded` and `X-Real-IP`, overwrites
   `X-Forwarded-For` with its direct peer, and is the only network allowed to
@@ -114,14 +121,15 @@ the normal exact-origin and CSRF checks.
 `make create-admin-user` remains available for bootstrap, recovery, and
 non-browser provisioning. It prompts for the password without placing it in
 shell history; `--password-stdin` supports secret-manager pipelines. Granting
-`agents:run`, `agents:manage`, or `agents:approve` on a self-created project
-requires a deliberate, durable override:
+`agents:approve` or any effect authority on a self-created project requires a
+deliberate, durable override; owner-controlled setup can grant analysis-only
+`agents:run` and `agents:manage` without one:
 
 ```bash
 make create-admin-user ARGS="\
   --email operator@example.com \
   --project-id acme \
-  --roles agents:manage \
+  --roles agents:approve \
   --allow-self-registered-execution \
   --override-actor operator@example.com \
   --override-reason 'Approved production automation boundary'"
@@ -169,7 +177,7 @@ Example degraded response:
 | Variable | Purpose |
 |---|---|
 | `POSTGRES_URL` | Admin users, memberships, and sessions through the non-owner runtime role |
-| `APDL_SERVICE_API_KEYS` | Canonical JSON object of project-scoped service keys; server-only |
+| `APDL_SERVICE_API_KEYS` | Optional Admin API-only JSON object of persistent project-scoped proxy keys; server-only, and not consumed by Agents |
 | `INGESTION_SERVICE_URL` | Private ingestion URL |
 | `CONFIG_SERVICE_URL` | Private config URL |
 | `QUERY_SERVICE_URL` | Private query URL |

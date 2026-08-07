@@ -14,7 +14,7 @@ from app.main import app
 from app.routers import webhooks
 from tests.fakes import FakePool
 
-_TEST_WEBHOOK_SECRET = "s3cret"
+_TEST_WEBHOOK_SECRET = "test_" + "b" * 59
 _REPOSITORY_ID = 10
 _INSTALLATION_ID = 1
 
@@ -22,6 +22,7 @@ _INSTALLATION_ID = 1
 @pytest.fixture(autouse=True)
 def configured_webhook_secret(monkeypatch):
     monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", _TEST_WEBHOOK_SECRET)
+    app.state.github_webhook_secret = _TEST_WEBHOOK_SECRET
 
 
 def _client() -> AsyncClient:
@@ -112,7 +113,7 @@ def test_every_webhook_route_requires_hmac_dependency():
 
 @pytest.mark.asyncio
 async def test_rejects_unset_secret_before_routing(monkeypatch):
-    monkeypatch.delenv("GITHUB_WEBHOOK_SECRET")
+    app.state.github_webhook_secret = None
     app.state.pg_pool = FakePool()
     calls = _patch_sync(monkeypatch)
 
@@ -146,6 +147,40 @@ async def test_rejects_invalid_signature_before_routing(monkeypatch):
         },
         event="status",
         headers={"X-Hub-Signature-256": "sha256=bad"},
+    )
+
+    assert response.status_code == 401
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_signature_uses_startup_bound_secret_not_mutated_environment(monkeypatch):
+    app.state.pg_pool = FakePool()
+    calls = _patch_sync(monkeypatch)
+    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", "changed_" + "c" * 56)
+
+    response = await _post(
+        {
+            "repository": {"id": _REPOSITORY_ID, "full_name": "acme/widgets"},
+            "installation": {"id": _INSTALLATION_ID},
+            "sha": "head-exact",
+        },
+        event="status",
+        headers={
+            "X-Hub-Signature-256": _sign(
+                json.dumps(
+                    {
+                        "repository": {
+                            "id": _REPOSITORY_ID,
+                            "full_name": "acme/widgets",
+                        },
+                        "installation": {"id": _INSTALLATION_ID},
+                        "sha": "head-exact",
+                    }
+                ).encode(),
+                "changed_" + "c" * 56,
+            )
+        },
     )
 
     assert response.status_code == 401

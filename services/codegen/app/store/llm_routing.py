@@ -74,6 +74,10 @@ AttemptBlockClassification = Literal[
     "unknown",
 ]
 
+# Runtime queries may row-lock the Codegen projections, but vault authority is
+# deliberately read-only to this service. Provider-pair advisory locks and the
+# just-in-time vault access boundary serialize and revalidate credential use.
+
 
 def _snapshot_runtime_is_current(snapshot: LlmExecutionSnapshot) -> bool:
     stage = codegen_rollout_stage()
@@ -266,7 +270,6 @@ async def _provider_authority(
         WHERE credential_id = $1
           AND project_id = $2
           AND provider = $3
-        FOR SHARE
         """,
         connection["credential_id"],
         project_id,
@@ -305,7 +308,6 @@ async def _credential_failure_classification(
                 WHERE credential_id = $1
                   AND project_id = $2
                   AND provider = $3
-                FOR SHARE
                 """,
                 credential_id,
                 project_id,
@@ -386,7 +388,7 @@ async def capture_execution_snapshot(
          AND consumer.consumer = 'codegen'
         WHERE assignment.project_id = $1
         ORDER BY CASE assignment.role WHEN 'editor' THEN 0 ELSE 1 END
-        FOR SHARE OF assignment, connection, model, credential, consumer
+        FOR SHARE OF assignment, connection, model
         """,
         project_id,
     )
@@ -980,7 +982,6 @@ async def mark_llm_egress(
                           AND project_id = $2
                           AND provider = $3
                           AND credential_version = $4
-                        FOR SHARE
                         """,
                         attempt.binding.credential_id,
                         attempt.project_id,

@@ -37,6 +37,12 @@ AGENTS_MUTATION_QUOTAS_SQL = (
 AGENTS_EXECUTION_LANE_SQL = (
     POSTGRES_MIGRATIONS / "034_agent_project_execution_lane.sql"
 ).read_text()
+AGENT_SERVICE_CAPABILITIES_SQL = (
+    POSTGRES_MIGRATIONS / "058_agent_service_capabilities.sql"
+).read_text()
+GITHUB_AUTHORIZATION_SQL = (
+    POSTGRES_MIGRATIONS / "059_github_repository_user_authorization.sql"
+).read_text()
 CONFIG_LEGACY_FIXTURE = (
     ROOT
     / "pipeline"
@@ -193,6 +199,42 @@ def test_agents_execution_lane_is_database_authoritative_and_fail_closed():
     assert "CREATE TRIGGER agent_approval_effects_guard_live_lane_insert" in sql
     assert "CREATE TRIGGER agent_approval_effects_guard_live_lane_update" in sql
     assert "FOR UPDATE;" in sql
+
+
+def test_agent_service_capabilities_continue_the_immutable_history():
+    sql = AGENT_SERVICE_CAPABILITIES_SQL
+
+    assert "CREATE TABLE public.agent_service_capabilities" in sql
+    assert "agent_service_capabilities_authority_shape_check" in sql
+    assert "agent_service_capabilities_mutation_binding_check" in sql
+    assert "CREATE FUNCTION public.apdl_consume_agent_service_capability" in sql
+    assert "SECURITY DEFINER" in sql
+    assert "SET search_path = pg_catalog, public" in sql
+    assert "DROP FUNCTION public.apdl_llm_vault_has_management_authority" in sql
+    assert "CREATE FUNCTION public.apdl_project_management_authority" in sql
+    assert "CREATE FUNCTION public.apdl_agents_grant_owner_execution_roles" in sql
+    assert "FROM apdl_runtime;" in sql
+    assert ") ON public.agent_service_capabilities TO apdl_agents;" in sql
+
+
+def test_github_authorization_quarantines_unprovable_oauth_rows():
+    sql = GITHUB_AUTHORIZATION_SQL
+
+    assert "authorization_source = 'legacy_unverified'" in sql
+    assert "status = 'revoked'" in sql
+    assert "WHERE authorization_source = 'github_oauth'" in sql
+    assert "github_repository_grants_legacy_quarantine_check" in sql
+    assert "github_repository_grants_oauth_subject_check" in sql
+    assert "'github_user:' || github_user_id::TEXT" in sql
+
+
+def test_github_authorization_candidates_are_immutable_and_least_privileged():
+    sql = GITHUB_AUTHORIZATION_SQL
+
+    assert "github_repository_authorization_candidates_immutable" in sql
+    assert "prevent_github_repository_authorization_candidate_update" in sql
+    assert "REVOKE UPDATE ON" in sql
+    assert "public.github_repository_authorization_candidates" in sql
 
 
 def test_observability_migration_uses_text_tenant_and_run_identifiers():

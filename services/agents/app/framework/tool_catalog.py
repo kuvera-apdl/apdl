@@ -133,12 +133,17 @@ async def _run_discover_events(
     ctx: AgentContext, p: DiscoverEventsParams, start: str, end: str
 ) -> Any:
     return await clickhouse.discover_events(
-        project_id=ctx.project_id, start_date=start, end_date=end, limit=p.limit
+        capability=ctx.service_capability(),
+        project_id=ctx.project_id,
+        start_date=start,
+        end_date=end,
+        limit=p.limit,
     )
 
 
 async def _run_query_events(ctx: AgentContext, p: QueryEventsParams, start: str, end: str) -> Any:
     return await clickhouse.query_events(
+        capability=ctx.service_capability(),
         project_id=ctx.project_id,
         start_date=start,
         end_date=end,
@@ -148,6 +153,7 @@ async def _run_query_events(ctx: AgentContext, p: QueryEventsParams, start: str,
 
 async def _run_timeseries(ctx: AgentContext, p: TimeseriesParams, start: str, end: str) -> Any:
     return await clickhouse.query_timeseries(
+        capability=ctx.service_capability(),
         project_id=ctx.project_id,
         selector=p.selector.payload(),
         start_date=start,
@@ -158,6 +164,7 @@ async def _run_timeseries(ctx: AgentContext, p: TimeseriesParams, start: str, en
 
 async def _run_funnel(ctx: AgentContext, p: FunnelParams, start: str, end: str) -> Any:
     return await clickhouse.query_funnel(
+        capability=ctx.service_capability(),
         project_id=ctx.project_id,
         steps=[s.payload() for s in p.steps],
         start_date=start,
@@ -168,6 +175,7 @@ async def _run_funnel(ctx: AgentContext, p: FunnelParams, start: str, end: str) 
 
 async def _run_retention(ctx: AgentContext, p: RetentionParams, start: str, end: str) -> Any:
     return await clickhouse.query_retention(
+        capability=ctx.service_capability(),
         project_id=ctx.project_id,
         cohort_selector=p.cohort_selector.payload(),
         return_selector=p.return_selector.payload(),
@@ -180,6 +188,7 @@ async def _run_retention(ctx: AgentContext, p: RetentionParams, start: str, end:
 
 async def _run_cohort(ctx: AgentContext, p: CohortParams, start: str, end: str) -> Any:
     return await clickhouse.query_cohort(
+        capability=ctx.service_capability(),
         project_id=ctx.project_id,
         cohort_property=p.cohort_property,
         metric_selector=p.metric_selector.payload(),
@@ -190,6 +199,7 @@ async def _run_cohort(ctx: AgentContext, p: CohortParams, start: str, end: str) 
 
 async def _run_breakdown(ctx: AgentContext, p: BreakdownParams, start: str, end: str) -> Any:
     return await clickhouse.query_breakdown(
+        capability=ctx.service_capability(),
         project_id=ctx.project_id,
         selector=p.selector.payload(),
         property_name=p.property_name,
@@ -200,11 +210,11 @@ async def _run_breakdown(ctx: AgentContext, p: BreakdownParams, start: str, end:
 
 
 async def _run_list_flags(ctx: AgentContext, p: EmptyParams, start: str, end: str) -> Any:
-    return await get_active_flags(ctx.project_id)
+    return await get_active_flags(ctx.service_capability(), ctx.project_id)
 
 
 async def _run_active_experiments(ctx: AgentContext, p: EmptyParams, start: str, end: str) -> Any:
-    return await get_active_experiments(ctx.project_id)
+    return await get_active_experiments(ctx.service_capability(), ctx.project_id)
 
 
 async def _run_statistical_plan(

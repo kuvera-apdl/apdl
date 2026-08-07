@@ -11,8 +11,15 @@ from pydantic import ValidationError
 from app.framework import tool_catalog
 
 
+SERVICE_CAPABILITY = object()
+
+
 def _ctx(project_id: str = "demo", days: int = 7) -> Any:
-    return SimpleNamespace(project_id=project_id, time_range_days=days)
+    return SimpleNamespace(
+        project_id=project_id,
+        time_range_days=days,
+        service_capability=lambda: SERVICE_CAPABILITY,
+    )
 
 
 def test_catalog_is_read_only():
@@ -94,6 +101,7 @@ async def test_run_tool_injects_project_and_date_window(monkeypatch):
     )
 
     assert captured["project_id"] == "proj-1"
+    assert captured["capability"] is SERVICE_CAPABILITY
     assert captured["window_days"] == 3
     assert captured["steps"][0] == {"event_name": "signup", "filters": []}
     # The window is ctx-derived: 14 inclusive calendar dates, in ISO form.
@@ -116,6 +124,7 @@ async def test_run_tool_one_day_window_is_today(monkeypatch):
 
     await tool_catalog.run_tool(_ctx(days=1), "discover_events", {})
 
+    assert captured["capability"] is SERVICE_CAPABILITY
     assert captured["start_date"] == captured["end_date"]
 
 
@@ -137,6 +146,7 @@ async def test_retention_tool_requires_and_forwards_window_relative_mode(monkeyp
     await tool_catalog.run_tool(_ctx(project_id="proj-1"), "query_retention", params)
 
     assert captured["project_id"] == "proj-1"
+    assert captured["capability"] is SERVICE_CAPABILITY
     assert captured["cohort_mode"] == "first_match_in_window"
 
     with pytest.raises(ValidationError):
@@ -155,15 +165,15 @@ async def test_retention_tool_requires_and_forwards_window_relative_mode(monkeyp
 
 @pytest.mark.asyncio
 async def test_run_tool_scopes_config_service_tools_to_ctx_project(monkeypatch):
-    seen: list[str] = []
+    seen: list[tuple[object, str]] = []
 
-    async def fake_flags(project_id):
-        seen.append(project_id)
+    async def fake_flags(capability, project_id):
+        seen.append((capability, project_id))
         return []
 
     monkeypatch.setattr(tool_catalog, "get_active_flags", fake_flags)
     await tool_catalog.run_tool(_ctx(project_id="proj-2"), "list_flags", {})
-    assert seen == ["proj-2"]
+    assert seen == [(SERVICE_CAPABILITY, "proj-2")]
 
 
 @pytest.mark.asyncio

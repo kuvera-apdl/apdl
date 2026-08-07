@@ -13,7 +13,7 @@ from pathlib import PurePosixPath
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.config import github_api_url
+from app.config import GITHUB_API_URL
 from app.github.client import gh_client, gh_headers, github_json_pages
 from app.runtime.models import (
     ArtifactFileEvidence,
@@ -64,7 +64,7 @@ async def _download_bounded_archive(
 ) -> bytes:
     """Follow redirects without forwarding tokens and enforce a streaming cap."""
     current = url
-    configured = httpx.URL(github_api_url())
+    configured = httpx.URL(GITHUB_API_URL)
     for _ in range(_MAX_REDIRECTS + 1):
         target = httpx.URL(current)
         is_api_origin = (target.scheme, target.host, target.port) == (
@@ -121,7 +121,7 @@ async def _assert_run_head(
     token: str,
 ) -> None:
     response = await client.get(
-        f"{github_api_url()}/repos/{repo}/actions/runs/{run_id}",
+        f"{GITHUB_API_URL}/repos/{repo}/actions/runs/{run_id}",
         headers=gh_headers(token),
     )
     response.raise_for_status()
@@ -148,7 +148,7 @@ async def list_run_artifacts(
     if max_pages <= 0:
         raise ValueError("max_pages must be positive")
     _validate_head_sha(head_sha)
-    base = github_api_url()
+    base = GITHUB_API_URL
     artifacts: list[GitHubArtifact] = []
     async with gh_client(client) as c:
         await _assert_run_head(c, repo, run_id, head_sha, token)
