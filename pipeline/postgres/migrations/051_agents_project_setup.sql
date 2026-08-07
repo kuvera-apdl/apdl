@@ -183,10 +183,15 @@ ALTER TABLE llm_provider_attempts
         )
         OR (
             NOT legacy_unbound_setup
+            AND setup_version IS NOT NULL
             AND setup_version > 0
+            AND model_tier IS NOT NULL
             AND model_tier IN ('fast', 'reasoning')
+            AND connection_version IS NOT NULL
             AND connection_version > 0
+            AND inventory_version IS NOT NULL
             AND inventory_version > 0
+            AND model_catalog_version IS NOT NULL
             AND model_catalog_version
                 ~ '^llm-provider-catalog@[1-9][0-9]*$'
         )
@@ -201,8 +206,8 @@ BEGIN
         (TG_OP = 'INSERT' AND NEW.legacy_unbound_setup)
         OR (
             TG_OP = 'UPDATE'
-            AND NEW.legacy_unbound_setup
-            AND NOT OLD.legacy_unbound_setup
+            AND NEW.legacy_unbound_setup IS DISTINCT FROM
+                OLD.legacy_unbound_setup
         )
         OR (
             TG_OP = 'UPDATE'

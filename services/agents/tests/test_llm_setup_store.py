@@ -623,3 +623,30 @@ def test_migration_splits_analysis_activation_from_operator_effect_authority() -
     ]
     assert "llm_project_setup_audit_no_update_delete" in sql
     assert "llm_project_setup_audit_no_truncate" in sql
+
+
+def test_migration_requires_complete_immutable_attempt_setup_bindings() -> None:
+    sql = MIGRATION.read_text(encoding="utf-8")
+    constraint = sql[
+        sql.index("ADD CONSTRAINT llm_provider_attempts_setup_binding_check") :
+        sql.index(
+            "CREATE OR REPLACE FUNCTION apdl_protect_llm_attempt_setup_binding"
+        )
+    ]
+    trigger_function = sql[
+        sql.index(
+            "CREATE OR REPLACE FUNCTION apdl_protect_llm_attempt_setup_binding"
+        ) :
+        sql.index("CREATE TRIGGER llm_provider_attempts_protect_setup_binding")
+    ]
+
+    for column in (
+        "setup_version",
+        "model_tier",
+        "connection_version",
+        "inventory_version",
+        "model_catalog_version",
+    ):
+        assert f"{column} IS NOT NULL" in constraint
+    assert "NEW.legacy_unbound_setup IS DISTINCT FROM" in trigger_function
+    assert "OLD.legacy_unbound_setup" in trigger_function
