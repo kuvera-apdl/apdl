@@ -6,10 +6,13 @@ from uuid import UUID
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
+import pytest
 
 from app import members
 from app.auth import AdminSession, require_session
 from app.login_security import DEVICE_COOKIE
+from app.models import PendingProjectInvitation
 from app.security import token_hash
 from conftest import make_settings
 
@@ -30,6 +33,7 @@ class MemberConnection:
         account_email: str = "invitee@example.com",
         target_roles: list[str] | None = None,
         target_is_owner: bool = False,
+        pending_blocked_reason: str | None = None,
     ) -> None:
         self.actor_is_owner = actor_is_owner
         self.actor_roles = actor_roles or [
@@ -41,6 +45,7 @@ class MemberConnection:
         self.account_email = account_email
         self.target_roles = target_roles or ["config:read"]
         self.target_is_owner = target_is_owner
+        self.pending_blocked_reason = pending_blocked_reason
         self.membership_exists = False
         self.invitation_row: dict[str, object] | None = None
         self.statements: list[tuple[str, tuple[object, ...]]] = []
@@ -153,6 +158,7 @@ class MemberConnection:
                 {
                     **self.invitation_row,
                     "inviter_email": "owner@example.com",
+                    "blocked_reason": self.pending_blocked_reason,
                 }
             ]
         if "FROM admin_project_membership_audit" in query:
@@ -256,12 +262,87 @@ def test_invite_is_revealed_once_and_list_never_contains_secret_material() -> No
         "email",
         "roles",
         "inviter_email",
+        "status",
+        "blocked_reason",
         "expires_at",
         "created_at",
     }
+    assert pending["status"] == "valid"
+    assert pending["blocked_reason"] is None
     assert "invitation_url" not in pending
     assert "token" not in pending
     assert "token_hash" not in pending
+
+
+def test_pending_invitation_exposes_live_blocked_authority_state() -> None:
+    connection = MemberConnection(
+        pending_blocked_reason="inviter_lacks_members_manage"
+    )
+    connection.invitation_row = {
+        "invitation_id": INVITATION_ID,
+        "email": "invitee@example.com",
+        "roles": ["config:read"],
+        "expires_at": NOW + timedelta(days=7),
+        "created_at": NOW,
+    }
+    with _client(connection, session=_session("members-csrf")) as client:
+        listed = client.get("/api/projects/demo/members")
+
+    assert listed.status_code == 200
+    assert listed.json()["pending_invitations"] == [
+        {
+            "invitation_id": str(INVITATION_ID),
+            "email": "invitee@example.com",
+            "roles": ["config:read"],
+            "inviter_email": "owner@example.com",
+            "status": "blocked",
+            "blocked_reason": "inviter_lacks_members_manage",
+            "expires_at": "2026-08-06T12:00:00Z",
+            "created_at": "2026-07-30T12:00:00Z",
+        }
+    ]
+    invitation_query = next(
+        query
+        for query, _ in connection.statements
+        if "END AS blocked_reason" in query
+    )
+    assert "LEFT JOIN admin_user_projects AS inviter_membership" in invitation_query
+    assert "WHEN NOT inviter.active" in invitation_query
+    assert "ANY(inviter_membership.roles)" in invitation_query
+    assert "invitation.roles <@ inviter_membership.roles" in invitation_query
+    assert "project.owner_user_id IS DISTINCT FROM" in invitation_query
+    for reason in (
+        "inviter_inactive",
+        "inviter_not_project_member",
+        "inviter_lacks_members_manage",
+        "roles_exceed_inviter_authority",
+        "members_manage_requires_owner",
+    ):
+        assert reason in invitation_query
+
+
+@pytest.mark.parametrize(
+    "status, blocked_reason",
+    [
+        ("valid", "inviter_inactive"),
+        ("blocked", None),
+    ],
+)
+def test_pending_invitation_rejects_incoherent_status(
+    status: str,
+    blocked_reason: str | None,
+) -> None:
+    with pytest.raises(ValidationError, match="blocked_reason must be null"):
+        PendingProjectInvitation(
+            invitation_id=INVITATION_ID,
+            email="invitee@example.com",
+            roles=["config:read"],
+            inviter_email="owner@example.com",
+            status=status,
+            blocked_reason=blocked_reason,
+            expires_at=NOW + timedelta(days=7),
+            created_at=NOW,
+        )
 
 
 def test_invitation_roles_are_canonical_and_bounded_by_live_authority() -> None:

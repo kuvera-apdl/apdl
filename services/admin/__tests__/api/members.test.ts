@@ -24,6 +24,8 @@ const INVITATION = {
   email: 'invitee@example.com',
   roles: ['config:read'],
   inviter_email: 'owner@example.com',
+  status: 'valid',
+  blocked_reason: null,
   expires_at: '2026-08-06T12:00:00Z',
   created_at: '2026-07-30T12:00:00Z',
 }
@@ -50,6 +52,13 @@ describe('project membership schemas', () => {
     ).toBe(true)
     expect(projectMemberSchema.safeParse(MEMBER).success).toBe(true)
     expect(pendingInvitationSchema.safeParse(INVITATION).success).toBe(true)
+    expect(
+      pendingInvitationSchema.safeParse({
+        ...INVITATION,
+        status: 'blocked',
+        blocked_reason: 'inviter_inactive',
+      }).success,
+    ).toBe(true)
     expect(
       projectInvitationRevealSchema.safeParse({
         ...INVITATION,
@@ -99,6 +108,20 @@ describe('project membership schemas', () => {
       invitationCreateRequestSchema.safeParse({
         email: 'invitee@example.com',
         roles: ['members:manage', 'config:read'],
+      }).success,
+    ).toBe(false)
+    expect(
+      pendingInvitationSchema.safeParse({
+        ...INVITATION,
+        status: 'valid',
+        blocked_reason: 'inviter_inactive',
+      }).success,
+    ).toBe(false)
+    expect(
+      pendingInvitationSchema.safeParse({
+        ...INVITATION,
+        status: 'blocked',
+        blocked_reason: null,
       }).success,
     ).toBe(false)
     expect(

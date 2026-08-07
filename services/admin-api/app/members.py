@@ -194,11 +194,14 @@ def _member(row) -> ProjectMember:
 
 
 def _invitation(row) -> PendingProjectInvitation:
+    blocked_reason = row["blocked_reason"]
     return PendingProjectInvitation(
         invitation_id=row["invitation_id"],
         email=str(row["email"]),
         roles=[str(role) for role in row["roles"]],
         inviter_email=str(row["inviter_email"]),
+        status="valid" if blocked_reason is None else "blocked",
+        blocked_reason=blocked_reason,
         expires_at=row["expires_at"],
         created_at=row["created_at"],
     )
@@ -282,17 +285,37 @@ async def list_project_members(
             project_id,
         )
         invitation_rows = await conn.fetch(
-            """
+            f"""
             SELECT
                 invitation.invitation_id,
                 invitation.email,
                 invitation.roles,
                 inviter.email AS inviter_email,
+                CASE
+                    WHEN NOT inviter.active THEN 'inviter_inactive'
+                    WHEN inviter_membership.user_id IS NULL
+                        THEN 'inviter_not_project_member'
+                    WHEN NOT (
+                        '{MEMBERS_MANAGE_ROLE}' = ANY(inviter_membership.roles)
+                    ) THEN 'inviter_lacks_members_manage'
+                    WHEN NOT (invitation.roles <@ inviter_membership.roles)
+                        THEN 'roles_exceed_inviter_authority'
+                    WHEN '{MEMBERS_MANAGE_ROLE}' = ANY(invitation.roles)
+                     AND project.owner_user_id IS DISTINCT FROM
+                         invitation.inviter_user_id
+                        THEN 'members_manage_requires_owner'
+                    ELSE NULL
+                END AS blocked_reason,
                 invitation.expires_at,
                 invitation.created_at
             FROM admin_project_invitations AS invitation
+            JOIN admin_projects AS project
+              ON project.project_id = invitation.project_id
             JOIN admin_users AS inviter
               ON inviter.user_id = invitation.inviter_user_id
+            LEFT JOIN admin_user_projects AS inviter_membership
+              ON inviter_membership.user_id = invitation.inviter_user_id
+             AND inviter_membership.project_id = invitation.project_id
             WHERE invitation.project_id = $1
               AND invitation.accepted_at IS NULL
               AND invitation.revoked_at IS NULL
@@ -434,6 +457,7 @@ async def create_project_invitation(
             {
                 **dict(row),
                 "inviter_email": session.email,
+                "blocked_reason": None,
             }
         ).model_dump(),
         invitation_url=f"{origin}/invitations/{raw_token}",

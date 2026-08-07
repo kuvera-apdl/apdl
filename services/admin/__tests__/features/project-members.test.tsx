@@ -124,6 +124,8 @@ test('keeps a reveal-once invitation URL only while its dialog is open', async (
           email: 'invitee@example.com',
           roles: ['config:read'],
           inviter_email: 'owner@example.com',
+          status: 'valid',
+          blocked_reason: null,
           expires_at: '2026-08-06T12:00:00Z',
           created_at: '2026-07-30T12:00:00Z',
           invitation_url: `http://localhost/invitations/${'b'.repeat(43)}`,
@@ -180,6 +182,41 @@ test('transfers ownership only to an eligible active manager after confirmation'
   await waitFor(() =>
     expect(screen.queryByRole('button', { name: 'Confirm transfer' })).not.toBeInTheDocument(),
   )
+})
+
+test('explains blocked invitations and keeps revocation available', async () => {
+  document.cookie = 'apdl_admin_csrf=members-csrf; Path=/'
+  server.use(
+    http.get('*/api/projects/demo/members', () =>
+      HttpResponse.json({
+        ...MEMBERS,
+        pending_invitations: [
+          {
+            invitation_id: INVITATION_ID,
+            email: 'blocked@example.com',
+            roles: ['config:read'],
+            inviter_email: 'manager@example.com',
+            status: 'blocked',
+            blocked_reason: 'inviter_lacks_members_manage',
+            expires_at: '2026-08-06T12:00:00Z',
+            created_at: '2026-07-30T12:00:00Z',
+          },
+        ],
+      }),
+    ),
+    ...baseHandlers(),
+    http.delete('*/api/projects/demo/invitations/:invitationId', () =>
+      new HttpResponse(null, { status: 204 }),
+    ),
+  )
+  renderMembers()
+
+  expect(await screen.findByText('blocked@example.com')).toBeInTheDocument()
+  expect(screen.getByText('blocked')).toBeInTheDocument()
+  expect(
+    screen.getByText(/inviter no longer has member-management authority/i),
+  ).toHaveTextContent('Revoke and reissue this invitation from an authorized account.')
+  expect(screen.getByRole('button', { name: 'Revoke' })).toBeEnabled()
 })
 
 test('read-only and operator-managed projects expose no inert management controls', async () => {

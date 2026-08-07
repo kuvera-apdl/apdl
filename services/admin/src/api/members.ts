@@ -89,22 +89,50 @@ export const projectMemberSchema = z
   })
   .strict()
 
-export const pendingInvitationSchema = z
-  .object({
-    invitation_id: uuidSchema,
-    email: z.string().email(),
-    roles: humanRoleListSchema,
-    inviter_email: z.string().email(),
-    expires_at: z.string().datetime({ offset: true }),
-    created_at: z.string().datetime({ offset: true }),
-  })
-  .strict()
+const invitationBlockedReasonSchema = z.enum([
+  'inviter_inactive',
+  'inviter_not_project_member',
+  'inviter_lacks_members_manage',
+  'roles_exceed_inviter_authority',
+  'members_manage_requires_owner',
+])
 
-export const projectInvitationRevealSchema = pendingInvitationSchema
-  .extend({
+const pendingInvitationFields = {
+  invitation_id: uuidSchema,
+  email: z.string().email(),
+  roles: humanRoleListSchema,
+  inviter_email: z.string().email(),
+  status: z.enum(['valid', 'blocked']),
+  blocked_reason: invitationBlockedReasonSchema.nullable(),
+  expires_at: z.string().datetime({ offset: true }),
+  created_at: z.string().datetime({ offset: true }),
+}
+
+function validateInvitationStatus(
+  invitation: { status: 'valid' | 'blocked'; blocked_reason: string | null },
+  context: z.RefinementCtx,
+) {
+  if ((invitation.status === 'valid') !== (invitation.blocked_reason === null)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['blocked_reason'],
+      message: 'blocked_reason must be null exactly when status is valid',
+    })
+  }
+}
+
+export const pendingInvitationSchema = z
+  .object(pendingInvitationFields)
+  .strict()
+  .superRefine(validateInvitationStatus)
+
+export const projectInvitationRevealSchema = z
+  .object({
+    ...pendingInvitationFields,
     invitation_url: z.string().url(),
   })
   .strict()
+  .superRefine(validateInvitationStatus)
 
 export const projectMembersSchema = z
   .object({

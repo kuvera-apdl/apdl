@@ -41,6 +41,13 @@ MembershipAuditAction = Literal[
     "roles_replace",
     "member_remove",
 ]
+InvitationBlockedReason = Literal[
+    "inviter_inactive",
+    "inviter_not_project_member",
+    "inviter_lacks_members_manage",
+    "roles_exceed_inviter_authority",
+    "members_manage_requires_owner",
+]
 ExecutionAuthorizationSource = Literal[
     "operator_provisioned", "self_registered_override"
 ]
@@ -252,6 +259,8 @@ class PendingProjectInvitation(BaseModel):
     email: str = Field(pattern=EMAIL_PATTERN, max_length=320)
     roles: list[HumanRole] = Field(min_length=1, max_length=11)
     inviter_email: str = Field(pattern=EMAIL_PATTERN, max_length=320)
+    status: Literal["valid", "blocked"]
+    blocked_reason: InvitationBlockedReason | None
     expires_at: datetime
     created_at: datetime
 
@@ -259,6 +268,10 @@ class PendingProjectInvitation(BaseModel):
     def validate_roles(self) -> "PendingProjectInvitation":
         if not _roles_are_canonical(self.roles):
             raise ValueError("roles must be unique and use canonical order")
+        if (self.status == "valid") != (self.blocked_reason is None):
+            raise ValueError(
+                "blocked_reason must be null exactly when status is valid"
+            )
         return self
 
 

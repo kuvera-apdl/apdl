@@ -30,6 +30,7 @@ import {
   transferProjectOwnership,
   type ProjectInvitationReveal,
   type ProjectMember,
+  type PendingInvitation,
 } from '@/api/members'
 import { CopyButton } from '@/components/shared/CopyButton'
 import { ErrorState } from '@/components/shared/PanelStates'
@@ -72,6 +73,17 @@ const ROLE_LABELS: Record<AdminRole, string> = {
   'agents:approve': 'Approve agent actions',
   'credentials:manage': 'Manage SDK credentials',
   'members:manage': 'Manage project members',
+}
+
+const BLOCKED_INVITATION_MESSAGES: Record<
+  NonNullable<PendingInvitation['blocked_reason']>,
+  string
+> = {
+  inviter_inactive: 'The inviter account is inactive.',
+  inviter_not_project_member: 'The inviter is no longer a project member.',
+  inviter_lacks_members_manage: 'The inviter no longer has member-management authority.',
+  roles_exceed_inviter_authority: "The requested roles exceed the inviter's current authority.",
+  members_manage_requires_owner: 'Only the current project owner can grant members:manage.',
 }
 
 function roleError(error: unknown): string {
@@ -541,7 +553,14 @@ export function ProjectMembersCard() {
                         className="flex flex-wrap items-center justify-between gap-3 rounded-md border p-3"
                       >
                         <div>
-                          <p className="text-sm font-medium">{invitation.email}</p>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <p className="text-sm font-medium">{invitation.email}</p>
+                            <Badge
+                              variant={invitation.status === 'valid' ? 'secondary' : 'destructive'}
+                            >
+                              {invitation.status}
+                            </Badge>
+                          </div>
                           <p className="mt-1 text-xs text-muted-foreground">
                             Invited by {invitation.inviter_email} · expires{' '}
                             <RelativeTime value={invitation.expires_at} />
@@ -549,8 +568,15 @@ export function ProjectMembersCard() {
                           <div className="mt-2">
                             <RoleBadges roles={invitation.roles} />
                           </div>
+                          {invitation.blocked_reason ? (
+                            <p className="mt-2 max-w-2xl text-xs text-destructive">
+                              {BLOCKED_INVITATION_MESSAGES[invitation.blocked_reason]} Revoke and
+                              reissue this invitation from an authorized account.
+                            </p>
+                          ) : null}
                         </div>
-                        {(isOwner || !invitation.roles.includes('members:manage')) ? (
+                        {invitation.roles.every((role) => active.roles.includes(role)) &&
+                        (isOwner || !invitation.roles.includes('members:manage')) ? (
                           <Button
                             size="sm"
                             variant="outline"
@@ -562,7 +588,9 @@ export function ProjectMembersCard() {
                             Revoke
                           </Button>
                         ) : (
-                          <span className="text-xs text-muted-foreground">Owner managed</span>
+                          <span className="max-w-48 text-right text-xs text-muted-foreground">
+                            A manager with the matching role ceiling must revoke this invitation.
+                          </span>
                         )}
                       </div>
                     ))}
