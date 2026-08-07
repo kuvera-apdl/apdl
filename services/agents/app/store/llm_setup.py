@@ -21,10 +21,6 @@ from app.store.llm_credentials import (
     RemoteProvider,
 )
 
-
-DEFAULT_PROJECT_DAILY_COST_LIMIT_USD_MICROS = 20_000_000
-DEFAULT_RUN_COST_LIMIT_USD_MICROS = 2_000_000
-
 SetupState = Literal["inactive", "active"]
 SetupTier = Literal["fast", "reasoning"]
 ManagementAuthority = Literal["owner", "delegated", "none"]
@@ -698,13 +694,15 @@ class AgentsSetupStore:
                     raise AgentsSetupValidationError(
                         "Selected models must share one reviewed data residency"
                     )
+                project_budget = int(
+                    policy["project_daily_cost_limit_usd_micros"]
+                )
+                run_budget = int(policy["run_cost_limit_usd_micros"])
                 previous_snapshot = _snapshot(
                     state=str(policy["state"]),
                     version=int(policy["version"]),
-                    project_budget=int(
-                        policy["project_daily_cost_limit_usd_micros"]
-                    ),
-                    run_budget=int(policy["run_cost_limit_usd_micros"]),
+                    project_budget=project_budget,
+                    run_budget=run_budget,
                     assignments=previous_assignments,
                 )
                 await conn.execute(
@@ -770,9 +768,7 @@ class AgentsSetupStore:
                         version = $2,
                         required_data_residency = $3,
                         allow_cross_vendor_retry = FALSE,
-                        project_daily_cost_limit_usd_micros = $4,
-                        run_cost_limit_usd_micros = $5,
-                        activated_by_actor_user_id = $6,
+                        activated_by_actor_user_id = $4,
                         activated_at = NOW(),
                         deactivated_by_actor_user_id = NULL,
                         deactivation_reason = NULL,
@@ -783,8 +779,6 @@ class AgentsSetupStore:
                     project_id,
                     next_version,
                     next(iter(residencies)),
-                    DEFAULT_PROJECT_DAILY_COST_LIMIT_USD_MICROS,
-                    DEFAULT_RUN_COST_LIMIT_USD_MICROS,
                     actor_user_id,
                 )
                 if (
@@ -800,10 +794,8 @@ class AgentsSetupStore:
                 next_snapshot = _snapshot(
                     state="active",
                     version=next_version,
-                    project_budget=(
-                        DEFAULT_PROJECT_DAILY_COST_LIMIT_USD_MICROS
-                    ),
-                    run_budget=DEFAULT_RUN_COST_LIMIT_USD_MICROS,
+                    project_budget=project_budget,
+                    run_budget=run_budget,
                     assignments=selections,
                 )
                 action = (

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -66,6 +67,8 @@ class _SetupConn:
         roles: list[str] | None = None,
         policy_state: str = "inactive",
         policy_version: int = 0,
+        project_budget: int = 20_000_000,
+        run_budget: int = 2_000_000,
     ) -> None:
         self.owner_user_id = owner_user_id
         self.account_active = account_active
@@ -93,8 +96,8 @@ class _SetupConn:
             "version": policy_version,
             "required_data_residency": "global",
             "allow_cross_vendor_retry": False,
-            "project_daily_cost_limit_usd_micros": 20_000_000,
-            "run_cost_limit_usd_micros": 2_000_000,
+            "project_daily_cost_limit_usd_micros": project_budget,
+            "run_cost_limit_usd_micros": run_budget,
             "activated_by_actor_user_id": (
                 ACTOR_ID if policy_version > 0 else None
             ),
@@ -278,6 +281,59 @@ def test_first_activation_role_grant_has_a_distinct_audit_action() -> None:
 
     assert "'activation_grant'" in function
     assert "'roles_replace'" not in function
+
+
+@pytest.mark.parametrize(
+    ("policy_state", "policy_version"),
+    [("inactive", 0), ("active", 4)],
+)
+@pytest.mark.asyncio
+async def test_setup_preserves_existing_budget_limits(
+    monkeypatch: pytest.MonkeyPatch,
+    policy_state: str,
+    policy_version: int,
+) -> None:
+    conn = _SetupConn(
+        policy_state=policy_state,
+        policy_version=policy_version,
+        project_budget=73_000_000,
+        run_budget=7_000_000,
+    )
+    store = AgentsSetupStore(_Pool(conn))
+
+    async def fake_get(project_id: str, *, actor_user_id: UUID | None) -> object:
+        return object()
+
+    monkeypatch.setattr(store, "get", fake_get)
+    await store.put(
+        "demo",
+        fast_model=_selection(),
+        reasoning_model=_selection(),
+        expected_version=policy_version,
+        actor_user_id=ACTOR_ID,
+    )
+
+    policy_update, update_args = next(
+        (query, args)
+        for query, args in conn.executed
+        if "UPDATE llm_project_policies" in query
+    )
+    assert "project_daily_cost_limit_usd_micros" not in policy_update
+    assert "run_cost_limit_usd_micros" not in policy_update
+    assert update_args == (
+        "demo",
+        policy_version + 1,
+        "global",
+        ACTOR_ID,
+    )
+    audit_args = next(
+        args
+        for query, args in conn.executed
+        if "INSERT INTO llm_project_setup_audit" in query
+    )
+    for snapshot in (json.loads(audit_args[4]), json.loads(audit_args[5])):
+        assert snapshot["project_daily_cost_limit_usd_micros"] == 73_000_000
+        assert snapshot["run_cost_limit_usd_micros"] == 7_000_000
 
 
 @pytest.mark.asyncio
