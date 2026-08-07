@@ -466,6 +466,11 @@ nearest micro-dollar. The current proxy does not measure provider usage, so
 these fields are informational evidence only and must not drive billing,
 budgets, or policy enforcement.
 
+Each changeset broker admits at most eight active socket handlers and configures
+an eight-connection listen backlog. Overflow transports are closed before any
+request parsing. Teardown cancels admitted peer I/O immediately, then preserves
+the database terminalization barrier for any attempt that reached preparation.
+
 Build and validate the three runtime images, apply migrations, then start the
 tenant overlay:
 

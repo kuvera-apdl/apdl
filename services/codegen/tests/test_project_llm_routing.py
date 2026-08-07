@@ -20,6 +20,7 @@ from app.llm import broker as broker_module
 from app.llm.broker import (
     LlmAttemptBroker,
     LlmBrokerClient,
+    LlmBrokerError,
     _AcquireRequest,
     _FinishRequest,
     _SuccessResponse,
@@ -364,6 +365,168 @@ async def test_broker_unix_socket_acquire_finish_round_trip(
             "error_classification": None,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_broker_bounds_idle_connections_and_closes_them_promptly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configured_backlogs: list[object] = []
+    real_start_unix_server = asyncio.start_unix_server
+
+    async def start_unix_server(
+        *args: object,
+        **kwargs: object,
+    ) -> asyncio.AbstractServer:
+        configured_backlogs.append(kwargs.get("backlog"))
+        return await real_start_unix_server(*args, **kwargs)
+
+    monkeypatch.setattr(
+        broker_module.asyncio,
+        "start_unix_server",
+        start_unix_server,
+    )
+    clients: list[tuple[asyncio.StreamReader, asyncio.StreamWriter]] = []
+    with TemporaryDirectory(prefix="apdl-broker-bounds-", dir="/tmp") as directory:
+        broker_root = Path(directory) / "broker-root"
+        prepare_broker_root(broker_root)
+        socket_path = broker_root / ("c" * 24) / "broker.sock"
+        broker = LlmAttemptBroker(
+            pool=object(),
+            credential_store=object(),  # type: ignore[arg-type]
+            changeset_id="changeset-1",
+            socket_path=socket_path,
+            token="t" * 43,
+            allowed_phases=("edit",),
+        )
+
+        await broker.start()
+        try:
+            for _ in range(broker_module._MAX_BROKER_HANDLERS):
+                clients.append(
+                    await asyncio.open_unix_connection(socket_path.as_posix())
+                )
+            async with asyncio.timeout(1.0):
+                while len(broker._handlers) < broker_module._MAX_BROKER_HANDLERS:
+                    await asyncio.sleep(0)
+            assert len(broker._handlers) == broker_module._MAX_BROKER_HANDLERS
+
+            overflow = await asyncio.open_unix_connection(socket_path.as_posix())
+            clients.append(overflow)
+            assert await asyncio.wait_for(overflow[0].read(1), timeout=1.0) == b""
+            assert len(broker._handlers) == broker_module._MAX_BROKER_HANDLERS
+
+            await asyncio.wait_for(broker.close(), timeout=1.0)
+            assert broker._handlers == set()
+            assert broker._active == {}
+            assert not socket_path.parent.exists()
+        finally:
+            if broker._server is not None:
+                await broker.close()
+            for _, writer in clients:
+                writer.close()
+            await asyncio.gather(
+                *(writer.wait_closed() for _, writer in clients),
+                return_exceptions=True,
+            )
+
+    assert configured_backlogs == [broker_module._BROKER_BACKLOG]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shutdown_cancelled", [False, True])
+async def test_broker_close_preserves_terminalization_reason_and_barrier(
+    monkeypatch: pytest.MonkeyPatch,
+    shutdown_cancelled: bool,
+) -> None:
+    prepare_entered = asyncio.Event()
+    prepare_release = asyncio.Event()
+    cleanup_entered = asyncio.Event()
+    cleanup_release = asyncio.Event()
+    terminalized = asyncio.Event()
+    cleanup_reasons: list[bool] = []
+
+    async def prepare(*args: object, **kwargs: object) -> PreparedLlmAttempt:
+        prepare_entered.set()
+        await prepare_release.wait()
+        return _attempt()
+
+    async def mark(*args: object, **kwargs: object) -> None:
+        raise AssertionError("closing broker must not mark new egress")
+
+    async def abandon(
+        pool: object,
+        *,
+        attempt_id: UUID,
+        cancelled: bool,
+    ) -> None:
+        assert attempt_id == ATTEMPT_ID
+        cleanup_reasons.append(cancelled)
+        cleanup_entered.set()
+        await cleanup_release.wait()
+        terminalized.set()
+
+    monkeypatch.setattr(broker_module, "prepare_llm_attempt", prepare)
+    monkeypatch.setattr(broker_module, "mark_llm_egress", mark)
+    monkeypatch.setattr(broker_module, "abandon_llm_attempt", abandon)
+    acquire_task: asyncio.Task[tuple[LlmAttemptLease, float]] | None = None
+    close_task: asyncio.Task[None] | None = None
+    with TemporaryDirectory(prefix="apdl-broker-close-", dir="/tmp") as directory:
+        broker_root = Path(directory) / "broker-root"
+        prepare_broker_root(broker_root)
+        socket_path = broker_root / ("d" * 24) / "broker.sock"
+        token = "t" * 43
+        broker = LlmAttemptBroker(
+            pool=object(),
+            credential_store=object(),  # type: ignore[arg-type]
+            changeset_id="changeset-1",
+            socket_path=socket_path,
+            token=token,
+            allowed_phases=("edit",),
+        )
+        client = LlmBrokerClient(
+            LlmExecutionAuthority(
+                socket_path=socket_path.as_posix(),
+                token=token,
+                editor_model="openai/gpt-5.4-mini",
+                helper_model="openai/gpt-5.4-nano",
+                allowed_phases=("brief", "edit", "review"),
+            ),
+            "changeset-1",
+        )
+
+        await broker.start()
+        try:
+            acquire_task = asyncio.create_task(client.acquire("edit"))
+            await asyncio.wait_for(prepare_entered.wait(), timeout=1.0)
+            close_task = asyncio.create_task(
+                broker.close(cancelled=shutdown_cancelled)
+            )
+            await asyncio.sleep(0)
+            assert not close_task.done()
+
+            prepare_release.set()
+            await asyncio.wait_for(cleanup_entered.wait(), timeout=1.0)
+            await asyncio.sleep(0)
+            assert not close_task.done()
+            assert cleanup_reasons == [shutdown_cancelled]
+
+            cleanup_release.set()
+            await asyncio.wait_for(close_task, timeout=1.0)
+            with pytest.raises(LlmBrokerError):
+                await acquire_task
+            assert terminalized.is_set()
+            assert broker._active == {}
+        finally:
+            prepare_release.set()
+            cleanup_release.set()
+            if broker._server is not None:
+                await broker.close(cancelled=shutdown_cancelled)
+            if close_task is not None and not close_task.done():
+                await asyncio.gather(close_task, return_exceptions=True)
+            if acquire_task is not None and not acquire_task.done():
+                acquire_task.cancel()
+                await asyncio.gather(acquire_task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
