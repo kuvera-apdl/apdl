@@ -11,7 +11,11 @@ from uuid import UUID, uuid4
 import pytest
 
 from app.llm import router
-from app.llm.client_cache import OwnedProviderClient, ProviderClientCache
+from app.llm.client_cache import (
+    OwnedProviderClient,
+    ProviderClientCache,
+    ProviderClientRetiredError,
+)
 from app.llm.contracts import (
     LlmBudgetExceededError,
     LlmCredentialUnavailableError,
@@ -44,10 +48,15 @@ class _ProviderLease:
         self._events.append("client:released")
 
 
-def _context(*, classification: str = "confidential", pool: Any = None):
+def _context(
+    *,
+    classification: str = "confidential",
+    pool: Any = None,
+    llm_runtime: Any = None,
+):
     return LlmRequestContext(
         pool=pool or object(),
-        llm_runtime=object(),
+        llm_runtime=llm_runtime if llm_runtime is not None else object(),
         project_id="projectA",
         run_id="run1",
         execution_kind="agent_run",
@@ -652,6 +661,54 @@ async def test_egress_mark_failure_retires_the_prepared_client(monkeypatch):
     assert (
         recorder.call_finishes[-1]["error_classification"]
         == "governance_unavailable"
+    )
+
+
+@pytest.mark.asyncio
+async def test_superseded_client_identity_is_durably_credential_unavailable(
+    monkeypatch,
+):
+    provider = _provider("openai", "model-a")
+    recorder = _GovernanceRecorder(_policy(provider))
+    acquire_provider_client = router._acquire_provider_client
+    recorder.install(monkeypatch)
+    monkeypatch.setattr(
+        router,
+        "_acquire_provider_client",
+        acquire_provider_client,
+    )
+    invoked = False
+
+    class SupersededCache:
+        async def acquire(self, identity, api_key):
+            assert identity.connection_version == 3
+            assert api_key == "project-provider-key"
+            raise ProviderClientRetiredError("stale identity")
+
+    async def must_not_run(model, messages, **kwargs):
+        nonlocal invoked
+        invoked = True
+        return router.TextCompletion("unsafe")
+
+    runtime = SimpleNamespace(provider_clients=SupersededCache())
+    monkeypatch.setitem(router._PROVIDER_FN, "openai", must_not_run)
+
+    with pytest.raises(LlmCredentialUnavailableError, match="superseded"):
+        await router.chat_completion(
+            "fast",
+            _MESSAGES,
+            context=_context(llm_runtime=runtime),
+        )
+
+    assert invoked is False
+    assert recorder.attempt_finishes[-1]["status"] == "blocked"
+    assert (
+        recorder.attempt_finishes[-1]["error_classification"]
+        == "credential_unavailable"
+    )
+    assert (
+        recorder.call_finishes[-1]["error_classification"]
+        == "credential_unavailable"
     )
 
 

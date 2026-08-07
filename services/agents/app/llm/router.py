@@ -35,7 +35,11 @@ import openai
 from google import genai
 from google.genai import types as genai_types
 
-from app.llm.client_cache import ProviderClientIdentity, ProviderClientLease
+from app.llm.client_cache import (
+    ProviderClientIdentity,
+    ProviderClientLease,
+    ProviderClientRetiredError,
+)
 from app.llm.contracts import (
     ErrorClassification,
     LlmBudgetExceededError,
@@ -117,7 +121,12 @@ async def _acquire_provider_client(
         credential_version=prepared.credential_version,
         connection_version=prepared.connection_version,
     )
-    return await context.llm_runtime.provider_clients.acquire(identity, api_key)
+    try:
+        return await context.llm_runtime.provider_clients.acquire(identity, api_key)
+    except ProviderClientRetiredError as exc:
+        raise LlmCredentialUnavailableError(
+            "Project provider connection was superseded before egress"
+        ) from exc
 
 
 _TIER_DEFAULTS: dict[str, dict[str, Any]] = {
