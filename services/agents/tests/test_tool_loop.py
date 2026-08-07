@@ -24,6 +24,7 @@ class _RecordingAudit:
 def _ctx() -> Any:
     return AgentContext(
         pool=None,
+        llm_runtime=object(),
         vector_store=None,
         project_id="demo",
         time_range_days=7,

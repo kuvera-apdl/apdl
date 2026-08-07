@@ -73,6 +73,7 @@ async def test_supervisor_halts_at_approval_gate(monkeypatch) -> None:
     await supervisor.run_supervisor(
         pool=pool,
         vector_store=object(),
+        llm_runtime=object(),
         run_id="run-1",
         project_id="demo",
         analysis_types=["experiment_design"],
@@ -97,6 +98,7 @@ async def test_invalid_experiment_output_uses_supervisor_error_path(monkeypatch)
     await supervisor.run_supervisor(
         pool=pool,
         vector_store=object(),
+        llm_runtime=object(),
         run_id="run-1",
         project_id="demo",
         analysis_types=["experiment_design"],

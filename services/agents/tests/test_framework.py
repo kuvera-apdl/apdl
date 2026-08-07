@@ -44,6 +44,7 @@ class FakeVectorStore:
 def make_ctx(vector_store: FakeVectorStore | None = None, **overrides: Any) -> AgentContext:
     return AgentContext(
         pool=None,  # unused by BaseAgent.run
+        llm_runtime=object(),
         vector_store=vector_store or FakeVectorStore(),
         audit=None,  # unused by BaseAgent.run
         run_id=overrides.get("run_id", "run-1"),
@@ -196,6 +197,7 @@ async def test_lifecycle_runs_all_phases(monkeypatch):
     assert calls["system"] == "SYS"
     assert "ctx0!" in calls["user"]              # context retrieved + gathered
     assert calls["context"].project_id == "proj1"
+    assert calls["context"].llm_runtime is ctx.llm_runtime
     assert calls["context"].purpose == "agent.sample_test_agent.reason"
     assert calls["context"].data_classification == "confidential"
     assert store.stored == []

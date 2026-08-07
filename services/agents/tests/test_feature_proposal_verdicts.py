@@ -11,6 +11,7 @@ from app.graphs.feature_proposal import FeatureProposalAgent
 def _ctx(pool: Any = None) -> AgentContext:
     return AgentContext(
         pool=pool,
+        llm_runtime=object(),
         vector_store=None,
         audit=None,
         run_id="run-1",

@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.auth import PostgresAuthenticator, authenticate_request
+from app.llm.runtime import LlmRuntime
 from app.memory.pgvector_store import PgVectorStore
 from app.readiness import capability_report
 from app.request_body_limit import RequestBodyLimitMiddleware
@@ -34,7 +35,6 @@ from app.store.llm_governance import (
     reconcile_orphaned_llm_attempts_forever,
 )
 from app.store.llm_connections import ProjectConnectionStore
-from app.store.llm_credentials import ProjectCredentialStore
 from app.store.llm_setup import AgentsSetupStore
 from app.store.run_leases import (
     requeue_expired_runs,
@@ -167,14 +167,14 @@ async def lifespan(application: FastAPI):
     maintenance_connection = None
     maintenance_task = None
     maintenance_listener = None
-    credential_store = None
+    llm_runtime = None
     worker_stop = asyncio.Event()
     worker_tasks: list[asyncio.Task] = []
     try:
         application.state.pg_pool = pool
         application.state.authenticator = PostgresAuthenticator(pool)
-        credential_store = ProjectCredentialStore.from_environment()
-        application.state.llm_credential_store = credential_store
+        llm_runtime = LlmRuntime.from_environment()
+        application.state.llm_runtime = llm_runtime
         application.state.llm_connection_store = ProjectConnectionStore(pool)
         application.state.agents_setup_store = AgentsSetupStore(pool)
         maintenance_connection = await pool.acquire()
@@ -219,7 +219,7 @@ async def lifespan(application: FastAPI):
         )
         worker_tasks.append(reaper_task)
         dispatcher_task = asyncio.create_task(
-            dispatch_runs_forever(pool, vector_store, worker_stop),
+            dispatch_runs_forever(pool, vector_store, llm_runtime, worker_stop),
             name="agent-run-dispatcher",
         )
         worker_tasks.append(dispatcher_task)
@@ -254,8 +254,8 @@ async def lifespan(application: FastAPI):
             )
         elif maintenance_connection is not None:
             await maintenance_connection.close()
-        if credential_store is not None:
-            await credential_store.aclose()
+        if llm_runtime is not None:
+            await llm_runtime.aclose()
         await pool.close()
         logger.info("Agents service shut down: PostgreSQL pool closed")
 
@@ -310,7 +310,7 @@ async def readiness_check(request: Request):
             "pg_pool",
             "authenticator",
             "vector_store",
-            "llm_credential_store",
+            "llm_runtime",
             "llm_connection_store",
             "agents_setup_store",
         )

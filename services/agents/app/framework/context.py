@@ -9,7 +9,7 @@ pattern of smuggling ``_vector_store`` through the state dict.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import asyncpg
 
@@ -22,6 +22,9 @@ from app.llm.contracts import (
 from app.safety.audit import AuditLogger
 from app.service_auth import ServiceCapabilityContext
 
+if TYPE_CHECKING:
+    from app.llm.runtime import LlmRuntime
+
 
 @dataclass
 class AgentContext:
@@ -30,6 +33,7 @@ class AgentContext:
     pool: asyncpg.Pool
     vector_store: PgVectorStore
     audit: AuditLogger
+    llm_runtime: LlmRuntime = field(repr=False, compare=False)
     run_id: str
     project_id: str
     execution_kind: ExecutionKind = "agent_run"
@@ -51,6 +55,7 @@ class AgentContext:
         """Build the required immutable governance scope for one LLM call."""
         return LlmRequestContext(
             pool=self.pool,
+            llm_runtime=self.llm_runtime,
             project_id=self.project_id,
             run_id=self.run_id,
             execution_kind=self.execution_kind,

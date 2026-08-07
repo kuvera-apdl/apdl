@@ -50,6 +50,7 @@ def _row(**overrides: Any) -> dict[str, Any]:
 def _client() -> AsyncClient:
     app.state.pg_pool = object()
     app.state.vector_store = object()
+    app.state.llm_runtime = object()
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 
 

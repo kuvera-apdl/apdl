@@ -5,11 +5,14 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import dataclass
-from typing import Any, Literal
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID
 
 import asyncpg
+
+if TYPE_CHECKING:
+    from app.llm.runtime import LlmRuntime
 
 
 ProviderName = Literal["openai", "anthropic", "google", "xai", "local"]
@@ -77,6 +80,7 @@ class LlmRequestContext:
     """The required tenant, execution, purpose, and privacy scope for one call."""
 
     pool: asyncpg.Pool
+    llm_runtime: LlmRuntime = field(repr=False, compare=False)
     project_id: str
     run_id: str
     execution_kind: ExecutionKind

@@ -139,6 +139,7 @@ async def test_custom_agent_runs_in_pipeline_order_and_persists(monkeypatch):
     await supervisor.run_supervisor(
         pool=pool,
         vector_store=object(),
+        llm_runtime=object(),
         run_id="run-1",
         project_id="demo",
         analysis_types=["churn_watch", "behavior_analysis"],
@@ -177,6 +178,7 @@ async def test_unknown_slug_is_error_not_crash(monkeypatch):
     await supervisor.run_supervisor(
         pool=pool,
         vector_store=object(),
+        llm_runtime=object(),
         run_id="run-2",
         project_id="demo",
         analysis_types=["behavior_analysis", "ghost_agent"],
@@ -211,6 +213,7 @@ async def test_custom_agent_with_unmet_requires_is_skipped(monkeypatch):
     await supervisor.run_supervisor(
         pool=pool,
         vector_store=object(),
+        llm_runtime=object(),
         run_id="run-3",
         project_id="demo",
         analysis_types=["churn_watch"],
@@ -257,6 +260,7 @@ async def test_resume_skips_completed_custom_agent(monkeypatch):
     await supervisor.run_supervisor(
         pool=pool,
         vector_store=object(),
+        llm_runtime=object(),
         run_id="run-4",
         project_id="demo",
         analysis_types=["behavior_analysis", "churn_watch"],

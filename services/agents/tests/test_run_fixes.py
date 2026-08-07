@@ -22,6 +22,7 @@ from app.llm.utils import parse_llm_json
 def _ctx(**ov: Any) -> AgentContext:
     return AgentContext(
         pool=None,
+        llm_runtime=object(),
         vector_store=None,
         audit=None,
         run_id="run-1",

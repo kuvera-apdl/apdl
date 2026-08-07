@@ -18,6 +18,7 @@ from typing import Any
 import asyncpg
 
 from app.graphs.supervisor import run_supervisor
+from app.llm.runtime import LlmRuntime
 from app.memory.pgvector_store import PgVectorStore
 
 logger = logging.getLogger(__name__)
@@ -212,9 +213,15 @@ async def fetch_dispatchable_runs(
 class RunDispatcher:
     """Own local task references while PostgreSQL owns queue durability."""
 
-    def __init__(self, pool: asyncpg.Pool, vector_store: PgVectorStore) -> None:
+    def __init__(
+        self,
+        pool: asyncpg.Pool,
+        vector_store: PgVectorStore,
+        llm_runtime: LlmRuntime,
+    ) -> None:
         self._pool = pool
         self._vector_store = vector_store
+        self._llm_runtime = llm_runtime
         self._tasks: dict[str, asyncio.Task[None]] = {}
 
     @property
@@ -239,6 +246,7 @@ class RunDispatcher:
                 run_supervisor(
                     pool=self._pool,
                     vector_store=self._vector_store,
+                    llm_runtime=self._llm_runtime,
                     run_id=run.run_id,
                     project_id=run.project_id,
                     analysis_types=list(run.analysis_types),
@@ -269,12 +277,13 @@ class RunDispatcher:
 async def dispatch_runs_forever(
     pool: asyncpg.Pool,
     vector_store: PgVectorStore,
+    llm_runtime: LlmRuntime,
     stop: asyncio.Event,
     *,
     interval_seconds: float = RUN_DISPATCH_INTERVAL_SECONDS,
 ) -> None:
     """Poll durable work on every replica until application shutdown."""
-    dispatcher = RunDispatcher(pool, vector_store)
+    dispatcher = RunDispatcher(pool, vector_store, llm_runtime)
     try:
         while not stop.is_set():
             try:

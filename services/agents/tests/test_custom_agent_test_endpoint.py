@@ -81,6 +81,7 @@ class _FakePool:
 def _client(pool: _FakePool) -> AsyncClient:
     app.state.pg_pool = pool
     app.state.vector_store = object()
+    app.state.llm_runtime = object()
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 
 

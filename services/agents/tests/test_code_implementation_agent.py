@@ -16,6 +16,7 @@ _PROPOSAL = {
 def _make_ctx(level: int = 3) -> AgentContext:
     return AgentContext(
         pool=None,
+        llm_runtime=object(),
         vector_store=None,
         audit=None,
         run_id="run-1",

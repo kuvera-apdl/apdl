@@ -332,6 +332,7 @@ async def test_custom(body: TestRunRequest, request: Request) -> TestRunResponse
             pool=pool,
             vector_store=request.app.state.vector_store,
             audit=AuditLogger(pool),
+            llm_runtime=request.app.state.llm_runtime,
             run_id=test_run_id,
             project_id=body.project_id,
             execution_kind="custom_agent_test",
