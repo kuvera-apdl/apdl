@@ -107,7 +107,11 @@ when retrying that exact exposure.
 | `DELETE /experiments/{key}?version=N` | Hard-delete a draft, or preserve a launched experiment as an immutable archive; always archive its backing flag |
 | `GET /experiments/{key}/audit` | This experiment key's retained lifecycle history with keyset pagination (`?limit`, `?before_id`); response declares `history_scope: experiment_key` |
 
-Create a flag:
+Create a flag through **Flags → New flag** in the Admin Console. For direct API
+access, set `APDL_API_KEY` to an operator-provisioned confidential credential
+with `config:write` as described in
+[Operator provision credentials](../../docs/authentication.md#operator-provision-credentials),
+then:
 
 ```bash
 curl -X POST http://localhost:8081/v1/admin/flags \
