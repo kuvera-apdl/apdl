@@ -15,6 +15,14 @@ for its published SDKs. APDL remains a pre-1.0 developer preview.
   probing, operator provisioning, audited provider-attempt storage, and Docker
   configuration.
 
+### Changed
+
+- Codegen GitHub App authentication uses the single canonical
+  `GITHUB_APP_PRIVATE_KEY_BASE64` setting. Supply one unwrapped line of standard
+  RFC 4648 Base64 that decodes to non-empty UTF-8 PEM text; invalid values fail
+  closed. Generate the value with
+  `openssl base64 -A -in path/to/github-app.private-key.pem`.
+
 ## [0.3.4] - 2026-07-29
 
 ### Changed
