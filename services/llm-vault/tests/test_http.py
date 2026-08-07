@@ -158,6 +158,55 @@ async def test_workload_token_is_bound_to_the_declared_consumer(
 
 
 @pytest.mark.asyncio
+async def test_non_ascii_authentication_headers_fail_closed(
+    configured_app: _Store,
+) -> None:
+    access_body = {
+        "schema_version": "llm_credential_access_request@1",
+        "project_id": "demo",
+        "provider": "openai",
+        "consumer": "codegen",
+        "execution_id": "attempt-non-ascii",
+        "purpose": "codegen.edit",
+        "expected_credential_id": str(CREDENTIAL_ID),
+        "expected_credential_version": 1,
+    }
+    actor_header = str(ACTOR_ID).encode("ascii")
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=vault_main.app),
+        base_url="http://test",
+    ) as client:
+        invalid_admin_token = await client.get(
+            "/v1/llm-connections",
+            params={"project_id": "demo"},
+            headers=[
+                (b"authorization", b"Bearer \xff"),
+                (b"x-apdl-project-id", b"demo"),
+                (b"x-apdl-actor-user-id", actor_header),
+            ],
+        )
+        invalid_project = await client.get(
+            "/v1/llm-connections",
+            params={"project_id": "demo"},
+            headers=[
+                (b"authorization", b"Bearer " + (b"admin-token-" * 3)),
+                (b"x-apdl-project-id", b"\xff"),
+                (b"x-apdl-actor-user-id", actor_header),
+            ],
+        )
+        invalid_consumer_token = await client.post(
+            "/internal/v1/credential-access",
+            headers=[(b"authorization", b"Bearer \xff")],
+            json=access_body,
+        )
+
+    assert invalid_admin_token.status_code == 401
+    assert invalid_project.status_code == 403
+    assert invalid_consumer_token.status_code == 401
+    assert configured_app.access_calls == []
+
+
+@pytest.mark.asyncio
 async def test_create_discovers_and_projects_before_persistence_without_echoing_key(
     configured_app: _Store,
     monkeypatch: pytest.MonkeyPatch,

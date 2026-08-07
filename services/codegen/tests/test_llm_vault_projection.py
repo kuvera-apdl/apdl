@@ -23,6 +23,11 @@ async def test_projection_accepts_canonical_json_array_and_requires_token(
         denied = await client.post(
             "/internal/v1/llm-vault/project-models", json=body
         )
+        malformed = await client.post(
+            "/internal/v1/llm-vault/project-models",
+            headers=[(b"authorization", b"Bearer \xff")],
+            json=body,
+        )
         allowed = await client.post(
             "/internal/v1/llm-vault/project-models",
             headers={"authorization": f"Bearer {token}"},
@@ -30,5 +35,6 @@ async def test_projection_accepts_canonical_json_array_and_requires_token(
         )
 
     assert denied.status_code == 401
+    assert malformed.status_code == 401
     assert allowed.status_code == 200, allowed.text
     assert allowed.json()["models"][0]["model_id"] == "gpt-5.4-mini"

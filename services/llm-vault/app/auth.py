@@ -11,6 +11,14 @@ from fastapi import HTTPException, Request, status
 from app.contracts import Consumer
 
 
+def _constant_time_header_equal(candidate: str, expected: str) -> bool:
+    try:
+        candidate_bytes = candidate.encode("latin-1")
+    except UnicodeEncodeError:
+        return False
+    return secrets.compare_digest(candidate_bytes, expected.encode("utf-8"))
+
+
 def _bearer(request: Request) -> str:
     raw = request.headers.get("authorization", "")
     prefix = "Bearer "
@@ -30,13 +38,13 @@ class AdminPrincipal:
 
 def require_admin(request: Request, project_id: str) -> AdminPrincipal:
     settings = request.app.state.settings
-    if not secrets.compare_digest(_bearer(request), settings.admin_token):
+    if not _constant_time_header_equal(_bearer(request), settings.admin_token):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Vault authentication failed",
         )
     asserted_project = request.headers.get("x-apdl-project-id", "")
-    if not secrets.compare_digest(asserted_project, project_id):
+    if not _constant_time_header_equal(asserted_project, project_id):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Project mismatch",
@@ -56,7 +64,7 @@ def require_consumer(request: Request, consumer: Consumer) -> None:
     expected = (
         settings.agents_token if consumer == "agents" else settings.codegen_token
     )
-    if not secrets.compare_digest(_bearer(request), expected):
+    if not _constant_time_header_equal(_bearer(request), expected):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Vault workload authentication failed",
