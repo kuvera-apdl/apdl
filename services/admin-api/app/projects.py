@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 import uuid
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import JSONResponse
 
 from app.auth import AdminSession, require_csrf, require_session
 from app.models import (
+    AuditCursor,
+    AuditPageQuery,
     ExecutionAuthorizationSummary,
     HumanProjectOwnership,
     OperatorManagedProjectOwnership,
     OwnershipAuditEntry,
+    OwnershipAuditPage,
     OwnershipTransferRequest,
     ProjectAccess,
     ProjectAuthorizationSummary,
@@ -334,8 +338,8 @@ async def transfer_project_ownership(
                 project_id,
                 actor_user_id,
                 body.target_user_id,
-                str(actor_user_id),
-                "Human owner transfer",
+                session.email,
+                body.reason or "No reason provided",
             )
 
         return await _fetch_authorization_summary(
@@ -347,13 +351,14 @@ async def transfer_project_ownership(
 
 @router.get(
     "/{project_id}/ownership/audit",
-    response_model=list[OwnershipAuditEntry],
+    response_model=OwnershipAuditPage,
 )
 async def project_ownership_audit(
     project_id: str,
     request: Request,
+    page: Annotated[AuditPageQuery, Query()],
     session: AdminSession = Depends(require_session),
-) -> list[OwnershipAuditEntry]:
+) -> OwnershipAuditPage:
     async with request.app.state.pg_pool.acquire() as conn:
         authorized = await conn.fetchval(
             """
@@ -392,9 +397,27 @@ async def project_ownership_audit(
             JOIN admin_users AS new_owner
               ON new_owner.user_id = audit.new_owner_user_id
             WHERE audit.project_id = $1
+              AND (
+                  $2::TIMESTAMPTZ IS NULL
+                  OR (audit.created_at, audit.audit_id)
+                     < ($2::TIMESTAMPTZ, $3::UUID)
+              )
             ORDER BY audit.created_at DESC, audit.audit_id DESC
-            LIMIT 200
+            LIMIT $4
             """,
             project_id,
+            page.before_created_at,
+            page.before_audit_id,
+            page.limit + 1,
         )
-    return [OwnershipAuditEntry(**dict(row)) for row in rows]
+    page_rows = rows[: page.limit]
+    entries = [OwnershipAuditEntry(**dict(row)) for row in page_rows]
+    next_cursor = (
+        AuditCursor(
+            created_at=page_rows[-1]["created_at"],
+            audit_id=page_rows[-1]["audit_id"],
+        )
+        if len(rows) > page.limit
+        else None
+    )
+    return OwnershipAuditPage(entries=entries, next_cursor=next_cursor)

@@ -4,6 +4,9 @@ import {
   invitationCreateRequestSchema,
   invitationInspectionSchema,
   membershipAuditEntrySchema,
+  membershipAuditPageSchema,
+  ownershipAuditPageSchema,
+  ownershipTransferRequestSchema,
   pendingInvitationSchema,
   projectAuthorizationSchema,
   projectInvitationRevealSchema,
@@ -28,6 +31,25 @@ const INVITATION = {
   blocked_reason: null,
   expires_at: '2026-08-06T12:00:00Z',
   created_at: '2026-07-30T12:00:00Z',
+}
+
+const MEMBERSHIP_AUDIT_ENTRY = {
+  audit_id: '40000000-0000-4000-8000-000000000004',
+  project_id: 'demo',
+  action: 'roles_replace',
+  actor_user_id: MEMBER.user_id,
+  actor_email: MEMBER.email,
+  subject_user_id: '50000000-0000-4000-8000-000000000005',
+  subject_email: 'member@example.com',
+  invitation_id: null,
+  previous_roles: ['config:read'],
+  new_roles: ['config:read', 'config:write'],
+  created_at: '2026-07-30T12:00:00Z',
+}
+
+const AUDIT_CURSOR = {
+  created_at: MEMBERSHIP_AUDIT_ENTRY.created_at,
+  audit_id: MEMBERSHIP_AUDIT_ENTRY.audit_id,
 }
 
 describe('project membership schemas', () => {
@@ -75,18 +97,30 @@ describe('project membership schemas', () => {
       }).success,
     ).toBe(true)
     expect(
-      membershipAuditEntrySchema.safeParse({
-        audit_id: '40000000-0000-4000-8000-000000000004',
-        project_id: 'demo',
-        action: 'roles_replace',
-        actor_user_id: MEMBER.user_id,
-        actor_email: MEMBER.email,
-        subject_user_id: '50000000-0000-4000-8000-000000000005',
-        subject_email: 'member@example.com',
-        invitation_id: null,
-        previous_roles: ['config:read'],
-        new_roles: ['config:read', 'config:write'],
-        created_at: '2026-07-30T12:00:00Z',
+      membershipAuditEntrySchema.safeParse(MEMBERSHIP_AUDIT_ENTRY).success,
+    ).toBe(true)
+    expect(
+      membershipAuditPageSchema.safeParse({
+        entries: [MEMBERSHIP_AUDIT_ENTRY],
+        next_cursor: AUDIT_CURSOR,
+      }).success,
+    ).toBe(true)
+    expect(
+      ownershipAuditPageSchema.safeParse({
+        entries: [
+          {
+            audit_id: '60000000-0000-4000-8000-000000000006',
+            project_id: 'demo',
+            previous_owner_user_id: MEMBER.user_id,
+            previous_owner_email: MEMBER.email,
+            new_owner_user_id: '70000000-0000-4000-8000-000000000007',
+            new_owner_email: 'new-owner@example.com',
+            actor: MEMBER.email,
+            reason: 'Planned team handoff',
+            created_at: '2026-07-31T12:00:00Z',
+          },
+        ],
+        next_cursor: null,
       }).success,
     ).toBe(true)
   })
@@ -136,6 +170,43 @@ describe('project membership schemas', () => {
         creator: null,
         ownership: { kind: 'operator_managed', owner_user_id: MEMBER.user_id },
         execution_authorization: { authorized: false, source: 'operator_provisioned' },
+      }).success,
+    ).toBe(false)
+    expect(membershipAuditPageSchema.safeParse([MEMBERSHIP_AUDIT_ENTRY]).success).toBe(false)
+    expect(
+      membershipAuditPageSchema.safeParse({
+        entries: [MEMBERSHIP_AUDIT_ENTRY],
+        next_cursor: { created_at: AUDIT_CURSOR.created_at },
+      }).success,
+    ).toBe(false)
+    expect(
+      membershipAuditPageSchema.safeParse({
+        entries: [MEMBERSHIP_AUDIT_ENTRY],
+        next_cursor: { ...AUDIT_CURSOR, offset: 50 },
+      }).success,
+    ).toBe(false)
+  })
+
+  test('normalizes and strictly validates ownership transfer context', () => {
+    expect(
+      ownershipTransferRequestSchema.parse({
+        target_user_id: MEMBER.user_id,
+        reason: '  Planned team handoff  ',
+      }),
+    ).toEqual({
+      target_user_id: MEMBER.user_id,
+      reason: 'Planned team handoff',
+    })
+    expect(
+      ownershipTransferRequestSchema.safeParse({
+        target_user_id: MEMBER.user_id,
+        reason: 'invalid\nreason',
+      }).success,
+    ).toBe(false)
+    expect(
+      ownershipTransferRequestSchema.safeParse({
+        target_user_id: MEMBER.user_id,
+        actor: MEMBER.email,
       }).success,
     ).toBe(false)
   })

@@ -255,8 +255,12 @@ test('creates a project and renders its management panels as tabs', async () => 
     http.get('*/api/projects/firstproject/members', () =>
       HttpResponse.json({ members: [], pending_invitations: [] }),
     ),
-    http.get('*/api/projects/firstproject/members/audit', () => HttpResponse.json([])),
-    http.get('*/api/projects/firstproject/ownership/audit', () => HttpResponse.json([])),
+    http.get('*/api/projects/firstproject/members/audit', () =>
+      HttpResponse.json({ entries: [], next_cursor: null }),
+    ),
+    http.get('*/api/projects/firstproject/ownership/audit', () =>
+      HttpResponse.json({ entries: [], next_cursor: null }),
+    ),
     http.get('*/api/projects/firstproject/agents/v1/agents/setup', () =>
       HttpResponse.json(
         makeAgentsSetup({

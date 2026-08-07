@@ -173,8 +173,6 @@ export const membershipAuditEntrySchema = z
   })
   .strict()
 
-export const membershipAuditListSchema = z.array(membershipAuditEntrySchema)
-
 export const ownershipAuditEntrySchema = z
   .object({
     audit_id: uuidSchema,
@@ -197,7 +195,26 @@ export const ownershipAuditEntrySchema = z
     }
   })
 
-export const ownershipAuditListSchema = z.array(ownershipAuditEntrySchema)
+export const auditCursorSchema = z
+  .object({
+    created_at: z.string().datetime({ offset: true }),
+    audit_id: uuidSchema,
+  })
+  .strict()
+
+export const membershipAuditPageSchema = z
+  .object({
+    entries: z.array(membershipAuditEntrySchema),
+    next_cursor: auditCursorSchema.nullable(),
+  })
+  .strict()
+
+export const ownershipAuditPageSchema = z
+  .object({
+    entries: z.array(ownershipAuditEntrySchema),
+    next_cursor: auditCursorSchema.nullable(),
+  })
+  .strict()
 
 export const invitationCreateRequestSchema = z
   .object({
@@ -210,6 +227,13 @@ export const memberRolesReplaceRequestSchema = z
   .object({ roles: humanRoleListSchema })
   .strict()
 
+export const ownershipTransferRequestSchema = z
+  .object({
+    target_user_id: uuidSchema,
+    reason: z.string().trim().min(1).max(2000).regex(/^[^\r\n]+$/).optional(),
+  })
+  .strict()
+
 export type ProjectAuthorization = z.infer<typeof projectAuthorizationSchema>
 export type ProjectMember = z.infer<typeof projectMemberSchema>
 export type PendingInvitation = z.infer<typeof pendingInvitationSchema>
@@ -218,9 +242,21 @@ export type ProjectMembers = z.infer<typeof projectMembersSchema>
 export type InvitationInspection = z.infer<typeof invitationInspectionSchema>
 export type MembershipAuditEntry = z.infer<typeof membershipAuditEntrySchema>
 export type OwnershipAuditEntry = z.infer<typeof ownershipAuditEntrySchema>
+export type AuditCursor = z.infer<typeof auditCursorSchema>
+export type MembershipAuditPage = z.infer<typeof membershipAuditPageSchema>
+export type OwnershipAuditPage = z.infer<typeof ownershipAuditPageSchema>
 
 function projectPath(projectId: string): string {
   return `/api/projects/${encodeURIComponent(projectId)}`
+}
+
+function auditPath(path: string, cursor: AuditCursor | null): string {
+  const params = new URLSearchParams({ limit: '50' })
+  if (cursor) {
+    params.set('before_created_at', cursor.created_at)
+    params.set('before_audit_id', cursor.audit_id)
+  }
+  return `${path}?${params.toString()}`
 }
 
 export function getProjectAuthorization(
@@ -291,31 +327,38 @@ export function removeProjectMember(projectId: string, memberUserId: string): Pr
 export function transferProjectOwnership(
   projectId: string,
   targetUserId: string,
+  reason?: string,
 ): Promise<ProjectAuthorization> {
+  const body = ownershipTransferRequestSchema.parse({
+    target_user_id: targetUserId,
+    ...(reason === undefined ? {} : { reason }),
+  })
   return request(adminConnection, `${projectPath(projectId)}/ownership/transfer`, {
     method: 'POST',
-    body: { target_user_id: uuidSchema.parse(targetUserId) },
+    body,
     schema: projectAuthorizationSchema,
   })
 }
 
 export function listMembershipAudit(
   projectId: string,
+  cursor: AuditCursor | null = null,
   signal?: AbortSignal,
-): Promise<MembershipAuditEntry[]> {
-  return request(adminConnection, `${projectPath(projectId)}/members/audit`, {
+): Promise<MembershipAuditPage> {
+  return request(adminConnection, auditPath(`${projectPath(projectId)}/members/audit`, cursor), {
     signal,
-    schema: membershipAuditListSchema,
+    schema: membershipAuditPageSchema,
   })
 }
 
 export function listOwnershipAudit(
   projectId: string,
+  cursor: AuditCursor | null = null,
   signal?: AbortSignal,
-): Promise<OwnershipAuditEntry[]> {
-  return request(adminConnection, `${projectPath(projectId)}/ownership/audit`, {
+): Promise<OwnershipAuditPage> {
+  return request(adminConnection, auditPath(`${projectPath(projectId)}/ownership/audit`, cursor), {
     signal,
-    schema: ownershipAuditListSchema,
+    schema: ownershipAuditPageSchema,
   })
 }
 

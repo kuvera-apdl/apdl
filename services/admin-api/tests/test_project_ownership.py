@@ -15,6 +15,8 @@ from conftest import make_settings
 OWNER_ID = UUID("20000000-0000-4000-8000-000000000002")
 TARGET_ID = UUID("30000000-0000-4000-8000-000000000003")
 CREATOR_ID = UUID("40000000-0000-4000-8000-000000000004")
+NEWEST_AUDIT_ID = UUID("70000000-0000-4000-8000-000000000007")
+OLDER_AUDIT_ID = UUID("60000000-0000-4000-8000-000000000006")
 
 
 class OwnershipConnection:
@@ -24,10 +26,28 @@ class OwnershipConnection:
         actor_id: UUID = OWNER_ID,
         owner_id: UUID | None = OWNER_ID,
         target_roles: list[str] | None = None,
+        audit_rows: list[dict[str, object]] | None = None,
     ) -> None:
         self.actor_id = actor_id
         self.owner_id = owner_id
         self.target_roles = target_roles or ["config:read", "members:manage"]
+        self.audit_rows = (
+            audit_rows
+            if audit_rows is not None
+            else [
+                {
+                    "audit_id": OLDER_AUDIT_ID,
+                    "project_id": "demo",
+                    "previous_owner_user_id": OWNER_ID,
+                    "previous_owner_email": "owner@example.com",
+                    "new_owner_user_id": TARGET_ID,
+                    "new_owner_email": "target@example.com",
+                    "actor": "owner@example.com",
+                    "reason": "Planned team handoff",
+                    "created_at": datetime(2026, 7, 30, tzinfo=timezone.utc),
+                }
+            ]
+        )
         self.statements: list[tuple[str, tuple[object, ...]]] = []
         self.audits: list[tuple[object, ...]] = []
 
@@ -57,21 +77,16 @@ class OwnershipConnection:
     async def fetch(self, query: str, *args):
         self.statements.append((query, args))
         if "FROM admin_project_ownership_audit" in query:
-            return [
-                {
-                    "audit_id": UUID(
-                        "60000000-0000-4000-8000-000000000006"
-                    ),
-                    "project_id": "demo",
-                    "previous_owner_user_id": OWNER_ID,
-                    "previous_owner_email": "owner@example.com",
-                    "new_owner_user_id": TARGET_ID,
-                    "new_owner_email": "target@example.com",
-                    "actor": str(OWNER_ID),
-                    "reason": "Human owner transfer",
-                    "created_at": datetime(2026, 7, 30, tzinfo=timezone.utc),
-                }
-            ]
+            before_created_at, before_audit_id, limit = args[1:]
+            rows = self.audit_rows
+            if before_created_at is not None:
+                rows = [
+                    row
+                    for row in rows
+                    if (row["created_at"], row["audit_id"])
+                    < (before_created_at, before_audit_id)
+                ]
+            return rows[:limit]
         assert "FOR UPDATE OF membership, account" in query
         return [
             {
@@ -165,7 +180,10 @@ def test_owner_transfers_only_owner_column_and_writes_immutable_audit() -> None:
         response = client.post(
             "/api/projects/demo/ownership/transfer",
             headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
-            json={"target_user_id": str(TARGET_ID)},
+            json={
+                "target_user_id": str(TARGET_ID),
+                "reason": "  Planned team handoff  ",
+            },
         )
 
     assert response.status_code == 200
@@ -175,10 +193,11 @@ def test_owner_transfers_only_owner_column_and_writes_immutable_audit() -> None:
         "owner_email": "target@example.com",
     }
     assert len(connection.audits) == 1
-    assert connection.audits[0][2:5] == (
+    assert connection.audits[0][2:6] == (
         OWNER_ID,
         TARGET_ID,
-        str(OWNER_ID),
+        "owner@example.com",
+        "Planned team handoff",
     )
     sql = [" ".join(query.split()) for query, _ in connection.statements]
     assert any("FOR UPDATE OF project" in query for query in sql)
@@ -211,19 +230,106 @@ def test_manager_can_read_immutable_ownership_history() -> None:
         response = client.get("/api/projects/demo/ownership/audit")
 
     assert response.status_code == 200
-    assert response.json() == [
+    assert response.json() == {
+        "entries": [
+            {
+                "audit_id": str(OLDER_AUDIT_ID),
+                "project_id": "demo",
+                "previous_owner_user_id": str(OWNER_ID),
+                "previous_owner_email": "owner@example.com",
+                "new_owner_user_id": str(TARGET_ID),
+                "new_owner_email": "target@example.com",
+                "actor": "owner@example.com",
+                "reason": "Planned team handoff",
+                "created_at": "2026-07-30T00:00:00Z",
+            }
+        ],
+        "next_cursor": None,
+    }
+
+
+def test_ownership_audit_uses_keyset_pagination() -> None:
+    newest_at = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    older_at = datetime(2026, 7, 30, tzinfo=timezone.utc)
+    rows = [
         {
-            "audit_id": "60000000-0000-4000-8000-000000000006",
+            "audit_id": NEWEST_AUDIT_ID,
             "project_id": "demo",
-            "previous_owner_user_id": str(OWNER_ID),
+            "previous_owner_user_id": OWNER_ID,
             "previous_owner_email": "owner@example.com",
-            "new_owner_user_id": str(TARGET_ID),
+            "new_owner_user_id": TARGET_ID,
             "new_owner_email": "target@example.com",
-            "actor": str(OWNER_ID),
-            "reason": "Human owner transfer",
-            "created_at": "2026-07-30T00:00:00Z",
-        }
+            "actor": "owner@example.com",
+            "reason": "First page",
+            "created_at": newest_at,
+        },
+        {
+            "audit_id": OLDER_AUDIT_ID,
+            "project_id": "demo",
+            "previous_owner_user_id": TARGET_ID,
+            "previous_owner_email": "target@example.com",
+            "new_owner_user_id": OWNER_ID,
+            "new_owner_email": "owner@example.com",
+            "actor": "target@example.com",
+            "reason": "Older page",
+            "created_at": older_at,
+        },
     ]
+    connection = OwnershipConnection(audit_rows=rows)
+    with _client(connection, _session("ownership-csrf")) as client:
+        first = client.get("/api/projects/demo/ownership/audit?limit=1")
+        cursor = first.json()["next_cursor"]
+        second = client.get(
+            "/api/projects/demo/ownership/audit",
+            params={
+                "limit": 1,
+                "before_created_at": cursor["created_at"],
+                "before_audit_id": cursor["audit_id"],
+            },
+        )
+
+    assert [entry["reason"] for entry in first.json()["entries"]] == [
+        "First page"
+    ]
+    assert cursor == {
+        "created_at": "2026-08-01T00:00:00Z",
+        "audit_id": str(NEWEST_AUDIT_ID),
+    }
+    assert [entry["reason"] for entry in second.json()["entries"]] == [
+        "Older page"
+    ]
+    assert second.json()["next_cursor"] is None
+    audit_queries = [
+        (query, args)
+        for query, args in connection.statements
+        if "FROM admin_project_ownership_audit" in query
+    ]
+    assert all("(audit.created_at, audit.audit_id)" in query for query, _ in audit_queries)
+    assert audit_queries[0][1] == ("demo", None, None, 2)
+    assert audit_queries[1][1] == (
+        "demo",
+        newest_at,
+        NEWEST_AUDIT_ID,
+        2,
+    )
+
+
+def test_transfer_without_reason_records_explicit_marker() -> None:
+    csrf = "ownership-csrf"
+    connection = OwnershipConnection()
+    with _client(connection, _session(csrf)) as client:
+        client.cookies.set("apdl_admin_csrf", csrf, path="/")
+        response = client.post(
+            "/api/projects/demo/ownership/transfer",
+            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
+            json={"target_user_id": str(TARGET_ID)},
+        )
+
+    assert response.status_code == 200
+    assert connection.audits[0][4:] == (
+        "owner@example.com",
+        "No reason provided",
+    )
 
 
 def test_non_owner_and_ineligible_target_cannot_transfer() -> None:
@@ -265,6 +371,15 @@ def test_transfer_requires_strict_schema_origin_and_csrf() -> None:
             headers={"Origin": "http://admin.test"},
             json={"target_user_id": str(TARGET_ID)},
         )
+        multiline_reason = client.post(
+            "/api/projects/demo/ownership/transfer",
+            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
+            json={
+                "target_user_id": str(TARGET_ID),
+                "reason": "invalid\nreason",
+            },
+        )
 
     assert unknown.status_code == 422
     assert missing_csrf.status_code == 403
+    assert multiline_reason.status_code == 422

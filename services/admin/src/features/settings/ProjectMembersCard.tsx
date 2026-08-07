@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query'
+import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import {
   ArrowRightLeft,
   Crown,
@@ -28,6 +28,7 @@ import {
   replaceProjectMemberRoles,
   revokeProjectInvitation,
   transferProjectOwnership,
+  type AuditCursor,
   type ProjectInvitationReveal,
   type ProjectMember,
   type PendingInvitation,
@@ -165,6 +166,7 @@ export function ProjectMembersCard() {
   const [editRoles, setEditRoles] = useState<AdminRole[]>([])
   const [transferOpen, setTransferOpen] = useState(false)
   const [transferTarget, setTransferTarget] = useState('')
+  const [transferReason, setTransferReason] = useState('')
   const [pending, setPending] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
 
@@ -178,16 +180,26 @@ export function ProjectMembersCard() {
     enabled: active !== null && canManage,
     queryFn: ({ signal }) => listProjectMembers(active!.projectId, signal),
   })
-  const audit = useQuery({
+  const audit = useInfiniteQuery({
     queryKey: active ? queryKeys.membershipAudit(active.id) : ['none', 'membership-audit'],
     enabled: active !== null && canManage,
-    queryFn: ({ signal }) => listMembershipAudit(active!.projectId, signal),
+    initialPageParam: null as AuditCursor | null,
+    queryFn: ({ pageParam, signal }) =>
+      listMembershipAudit(active!.projectId, pageParam, signal),
+    getNextPageParam: (lastPage) => lastPage.next_cursor ?? undefined,
   })
-  const ownershipAudit = useQuery({
+  const ownershipAudit = useInfiniteQuery({
     queryKey: active ? queryKeys.ownershipAudit(active.id) : ['none', 'ownership-audit'],
     enabled: active !== null && canManage,
-    queryFn: ({ signal }) => listOwnershipAudit(active!.projectId, signal),
+    initialPageParam: null as AuditCursor | null,
+    queryFn: ({ pageParam, signal }) =>
+      listOwnershipAudit(active!.projectId, pageParam, signal),
+    getNextPageParam: (lastPage) => lastPage.next_cursor ?? undefined,
   })
+
+  const membershipAuditEntries = audit.data?.pages.flatMap((page) => page.entries) ?? []
+  const ownershipAuditEntries =
+    ownershipAudit.data?.pages.flatMap((page) => page.entries) ?? []
 
   const clearReveal = useCallback(() => {
     revealRef.current = null
@@ -199,6 +211,8 @@ export function ProjectMembersCard() {
     setInviteOpen(false)
     setEditMember(null)
     setTransferOpen(false)
+    setTransferTarget('')
+    setTransferReason('')
     setActionError(null)
   }, [active?.id, clearReveal])
 
@@ -335,9 +349,14 @@ export function ProjectMembersCard() {
     setPending(true)
     setActionError(null)
     try {
-      await transferProjectOwnership(active.projectId, transferTarget)
+      await transferProjectOwnership(
+        active.projectId,
+        transferTarget,
+        transferReason.trim() || undefined,
+      )
       setTransferOpen(false)
       setTransferTarget('')
+      setTransferReason('')
       toast.success('Project ownership transferred')
       void authorization.refetch()
       refreshManagement()
@@ -609,41 +628,66 @@ export function ProjectMembersCard() {
                   <p className="text-sm text-destructive">
                     {(audit.error ?? ownershipAudit.error)?.message}
                   </p>
-                ) : audit.data?.length || ownershipAudit.data?.length ? (
-                  <div className="max-h-72 space-y-2 overflow-y-auto">
-                    {ownershipAudit.data?.map((entry) => (
-                      <div key={entry.audit_id} className="rounded-md border p-3 text-sm">
-                        <div className="flex flex-wrap items-center justify-between gap-2">
-                          <Badge variant="outline">ownership transfer</Badge>
-                          <RelativeTime value={entry.created_at} className="text-muted-foreground" />
+                ) : membershipAuditEntries.length || ownershipAuditEntries.length ? (
+                  <div className="space-y-3">
+                    <div className="max-h-72 space-y-2 overflow-y-auto">
+                      {ownershipAuditEntries.map((entry) => (
+                        <div key={entry.audit_id} className="rounded-md border p-3 text-sm">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <Badge variant="outline">ownership transfer</Badge>
+                            <RelativeTime
+                              value={entry.created_at}
+                              className="text-muted-foreground"
+                            />
+                          </div>
+                          <p className="mt-2">
+                            {entry.previous_owner_email ?? 'Operator managed'} →{' '}
+                            {entry.new_owner_email}
+                          </p>
+                          <p className="mt-1 text-xs text-muted-foreground">
+                            {entry.actor} · {entry.reason}
+                          </p>
                         </div>
-                        <p className="mt-2">
-                          {entry.previous_owner_email ?? 'Operator managed'} →{' '}
-                          {entry.new_owner_email}
-                        </p>
-                        <p className="mt-1 text-xs text-muted-foreground">
-                          {entry.actor} · {entry.reason}
-                        </p>
-                      </div>
-                    ))}
-                    {audit.data?.map((entry) => (
-                      <div key={entry.audit_id} className="rounded-md border p-3 text-sm">
-                        <div className="flex flex-wrap items-center justify-between gap-2">
-                          <Badge variant="outline">{entry.action.replaceAll('_', ' ')}</Badge>
-                          <RelativeTime value={entry.created_at} className="text-muted-foreground" />
+                      ))}
+                      {membershipAuditEntries.map((entry) => (
+                        <div key={entry.audit_id} className="rounded-md border p-3 text-sm">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <Badge variant="outline">{entry.action.replaceAll('_', ' ')}</Badge>
+                            <RelativeTime
+                              value={entry.created_at}
+                              className="text-muted-foreground"
+                            />
+                          </div>
+                          <p className="mt-2">
+                            {entry.actor_email} → {entry.subject_email}
+                          </p>
+                          <div className="mt-2 flex flex-wrap items-center gap-2">
+                            {entry.previous_roles ? (
+                              <RoleBadges roles={entry.previous_roles} />
+                            ) : null}
+                            {entry.previous_roles && entry.new_roles ? (
+                              <span className="text-muted-foreground">→</span>
+                            ) : null}
+                            {entry.new_roles ? <RoleBadges roles={entry.new_roles} /> : null}
+                          </div>
                         </div>
-                        <p className="mt-2">
-                          {entry.actor_email} → {entry.subject_email}
-                        </p>
-                        <div className="mt-2 flex flex-wrap items-center gap-2">
-                          {entry.previous_roles ? <RoleBadges roles={entry.previous_roles} /> : null}
-                          {entry.previous_roles && entry.new_roles ? (
-                            <span className="text-muted-foreground">→</span>
-                          ) : null}
-                          {entry.new_roles ? <RoleBadges roles={entry.new_roles} /> : null}
-                        </div>
-                      </div>
-                    ))}
+                      ))}
+                    </div>
+                    {audit.hasNextPage || ownershipAudit.hasNextPage ? (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={audit.isFetchingNextPage || ownershipAudit.isFetchingNextPage}
+                        onClick={() => {
+                          if (audit.hasNextPage) void audit.fetchNextPage()
+                          if (ownershipAudit.hasNextPage) void ownershipAudit.fetchNextPage()
+                        }}
+                      >
+                        {audit.isFetchingNextPage || ownershipAudit.isFetchingNextPage
+                          ? 'Loading older activity…'
+                          : 'Load older activity'}
+                      </Button>
+                    ) : null}
                   </div>
                 ) : (
                   <p className="text-sm text-muted-foreground">No access changes recorded yet.</p>
@@ -795,6 +839,7 @@ export function ProjectMembersCard() {
           setTransferOpen(open)
           if (!open) {
             setTransferTarget('')
+            setTransferReason('')
             setActionError(null)
           }
         }}
@@ -828,6 +873,17 @@ export function ProjectMembersCard() {
               </p>
             ) : null}
           </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="ownership-reason">Reason (optional)</Label>
+            <Input
+              id="ownership-reason"
+              value={transferReason}
+              maxLength={2000}
+              placeholder="Planned team handoff"
+              disabled={pending}
+              onChange={(event) => setTransferReason(event.target.value)}
+            />
+          </div>
           <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm">
             Confirming makes the selected manager the only owner of project {active.projectId}.
           </div>
@@ -837,7 +893,16 @@ export function ProjectMembersCard() {
             </p>
           ) : null}
           <DialogFooter>
-            <Button variant="outline" onClick={() => setTransferOpen(false)} disabled={pending}>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setTransferOpen(false)
+                setTransferTarget('')
+                setTransferReason('')
+                setActionError(null)
+              }}
+              disabled={pending}
+            >
               Cancel
             </Button>
             <Button

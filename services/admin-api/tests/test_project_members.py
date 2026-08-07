@@ -19,6 +19,8 @@ from conftest import make_settings
 ACTOR_ID = UUID("20000000-0000-4000-8000-000000000002")
 TARGET_ID = UUID("30000000-0000-4000-8000-000000000003")
 INVITATION_ID = UUID("40000000-0000-4000-8000-000000000004")
+NEWEST_AUDIT_ID = UUID("70000000-0000-4000-8000-000000000007")
+OLDER_AUDIT_ID = UUID("60000000-0000-4000-8000-000000000006")
 NOW = datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)
 RAW_TOKEN = "a" * 43
 
@@ -34,6 +36,7 @@ class MemberConnection:
         target_roles: list[str] | None = None,
         target_is_owner: bool = False,
         pending_blocked_reason: str | None = None,
+        membership_audit_rows: list[dict[str, object]] | None = None,
     ) -> None:
         self.actor_is_owner = actor_is_owner
         self.actor_roles = actor_roles or [
@@ -46,6 +49,11 @@ class MemberConnection:
         self.target_roles = target_roles or ["config:read"]
         self.target_is_owner = target_is_owner
         self.pending_blocked_reason = pending_blocked_reason
+        self.membership_audit_rows = (
+            membership_audit_rows
+            if membership_audit_rows is not None
+            else []
+        )
         self.membership_exists = False
         self.invitation_row: dict[str, object] | None = None
         self.statements: list[tuple[str, tuple[object, ...]]] = []
@@ -162,7 +170,16 @@ class MemberConnection:
                 }
             ]
         if "FROM admin_project_membership_audit" in query:
-            return []
+            before_created_at, before_audit_id, limit = args[1:]
+            rows = self.membership_audit_rows
+            if before_created_at is not None:
+                rows = [
+                    row
+                    for row in rows
+                    if (row["created_at"], row["audit_id"])
+                    < (before_created_at, before_audit_id)
+                ]
+            return rows[:limit]
         raise AssertionError(f"Unexpected fetch query: {query}")
 
     async def execute(self, query: str, *args):
@@ -542,6 +559,84 @@ def test_role_replacement_and_removal_cannot_mutate_owner_or_delegated_manager()
             headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
         )
     assert replace_manager.status_code == remove_manager.status_code == 403
+
+
+def test_membership_audit_uses_keyset_pagination() -> None:
+    newest_at = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    older_at = datetime(2026, 7, 30, tzinfo=timezone.utc)
+    rows = [
+        {
+            "audit_id": NEWEST_AUDIT_ID,
+            "project_id": "demo",
+            "action": "roles_replace",
+            "actor_user_id": ACTOR_ID,
+            "actor_email": "owner@example.com",
+            "subject_user_id": TARGET_ID,
+            "subject_email": "target@example.com",
+            "invitation_id": None,
+            "previous_roles": ["config:read"],
+            "new_roles": ["config:read", "config:write"],
+            "created_at": newest_at,
+        },
+        {
+            "audit_id": OLDER_AUDIT_ID,
+            "project_id": "demo",
+            "action": "invitation_create",
+            "actor_user_id": ACTOR_ID,
+            "actor_email": "owner@example.com",
+            "subject_user_id": None,
+            "subject_email": "invitee@example.com",
+            "invitation_id": INVITATION_ID,
+            "previous_roles": None,
+            "new_roles": ["config:read"],
+            "created_at": older_at,
+        },
+    ]
+    connection = MemberConnection(membership_audit_rows=rows)
+    with _client(connection, session=_session("members-csrf")) as client:
+        first = client.get("/api/projects/demo/members/audit?limit=1")
+        cursor = first.json()["next_cursor"]
+        second = client.get(
+            "/api/projects/demo/members/audit",
+            params={
+                "limit": 1,
+                "before_created_at": cursor["created_at"],
+                "before_audit_id": cursor["audit_id"],
+            },
+        )
+        partial_cursor = client.get(
+            "/api/projects/demo/members/audit",
+            params={"before_created_at": "2026-08-01T00:00:00Z"},
+        )
+
+    assert [entry["action"] for entry in first.json()["entries"]] == [
+        "roles_replace"
+    ]
+    assert cursor == {
+        "created_at": "2026-08-01T00:00:00Z",
+        "audit_id": str(NEWEST_AUDIT_ID),
+    }
+    assert [entry["action"] for entry in second.json()["entries"]] == [
+        "invitation_create"
+    ]
+    assert second.json()["next_cursor"] is None
+    assert partial_cursor.status_code == 422
+    audit_queries = [
+        (query, args)
+        for query, args in connection.statements
+        if "FROM admin_project_membership_audit" in query
+    ]
+    assert all(
+        "(audit.created_at, audit.audit_id)" in query
+        for query, _ in audit_queries
+    )
+    assert audit_queries[0][1] == ("demo", None, None, 2)
+    assert audit_queries[1][1] == (
+        "demo",
+        newest_at,
+        NEWEST_AUDIT_ID,
+        2,
+    )
 
 
 def test_mutations_require_origin_csrf_and_strict_request_shapes() -> None:

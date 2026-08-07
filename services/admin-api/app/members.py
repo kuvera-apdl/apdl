@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 import re
+from typing import Annotated
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 
 from app.auth import (
     ACCOUNT_REGISTRATION_LOCK_ID,
@@ -23,11 +24,14 @@ from app.login_security import (
     set_device_cookie,
 )
 from app.models import (
+    AuditCursor,
+    AuditPageQuery,
     InvitationCreateRequest,
     InvitationInspection,
     InvitationRegistrationRequest,
     MemberRolesReplaceRequest,
     MembershipAuditEntry,
+    MembershipAuditPage,
     PendingProjectInvitation,
     ProjectAccess,
     ProjectInvitationReveal,
@@ -701,13 +705,14 @@ async def remove_project_member(
 
 @router.get(
     "/api/projects/{project_id}/members/audit",
-    response_model=list[MembershipAuditEntry],
+    response_model=MembershipAuditPage,
 )
 async def list_membership_audit(
     project_id: str,
     request: Request,
+    page: Annotated[AuditPageQuery, Query()],
     session: AdminSession = Depends(require_session),
-) -> list[MembershipAuditEntry]:
+) -> MembershipAuditPage:
     async with request.app.state.pg_pool.acquire() as conn:
         await _manager_context(
             conn,
@@ -733,12 +738,30 @@ async def list_membership_audit(
             JOIN admin_users AS actor
               ON actor.user_id = audit.actor_user_id
             WHERE audit.project_id = $1
+              AND (
+                  $2::TIMESTAMPTZ IS NULL
+                  OR (audit.created_at, audit.audit_id)
+                     < ($2::TIMESTAMPTZ, $3::UUID)
+              )
             ORDER BY audit.created_at DESC, audit.audit_id DESC
-            LIMIT 200
+            LIMIT $4
             """,
             project_id,
+            page.before_created_at,
+            page.before_audit_id,
+            page.limit + 1,
         )
-    return [MembershipAuditEntry(**dict(row)) for row in rows]
+    page_rows = rows[: page.limit]
+    entries = [MembershipAuditEntry(**dict(row)) for row in page_rows]
+    next_cursor = (
+        AuditCursor(
+            created_at=page_rows[-1]["created_at"],
+            audit_id=page_rows[-1]["audit_id"],
+        )
+        if len(rows) > page.limit
+        else None
+    )
+    return MembershipAuditPage(entries=entries, next_cursor=next_cursor)
 
 
 @router.get(
