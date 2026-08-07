@@ -30,6 +30,12 @@ projection token. Local `make setup` generates the encryption key and admin
 token once and preserves both on later setup runs; deployments must provision
 their own independent values.
 
+The separate `APDL_LLM_VAULT_POSTGRES_PASSWORD` migration setting must remain
+available on every PostgreSQL migration run, not only initial bootstrap. Use
+that same explicit password in the vault's `POSTGRES_URL`; otherwise the
+migrator skips login-password reconciliation and the service credential can
+drift from the database role.
+
 ## API boundaries
 
 - Admin lifecycle: `/v1/llm-connections` and connection-specific replace,

@@ -65,6 +65,14 @@ before starting an ordinary host-run service. Agents must instead use the
 service runner and Compose do this automatically. Use the `apdl_llm_vault` URL
 only for the vault and its offline key-rotation command.
 
+Keep `APDL_LLM_VAULT_POSTGRES_PASSWORD` available to every supported
+PostgreSQL migration run, not only the initial bootstrap or migration 056. The
+migrator reconciles the `apdl_llm_vault` login password before it plans or
+applies migrations. Omitting the variable activates only the schema-validation
+path, skips password reconciliation, and can leave the database role out of sync
+with the vault service's `POSTGRES_URL`. Supply the same explicit password to
+both boundaries on every deployment migration.
+
 `infra/docker/postgres/init-apdl-roles.sh` is strictly a fresh-`initdb`
 bootstrap. For an existing database with an exact checksummed migration-ledger
 prefix, the PostgreSQL migrator provisions and validates `apdl_agents`,
