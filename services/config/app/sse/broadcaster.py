@@ -263,13 +263,12 @@ class SSEBroadcaster:
             }
 
     async def expire_connections(self) -> None:
-        """Signal and unregister connections whose hard lifetime has elapsed.
+        """Signal connections whose hard lifetime has elapsed.
 
-        Unregistering here is deliberate: a transport may disappear before its
-        response generator observes cancellation. The maintenance owner must
-        reclaim quota without depending on a consumer task that may no longer
-        exist. A live generator still observes ``close_event`` and its later
-        idempotent removal becomes a no-op.
+        Expired subscriptions remain registered until their response generator
+        exits and calls ``remove_connection``. Keeping them in the admission
+        counters binds quota to the socket, queue, and task lifetime even when
+        delivery of the terminal close event is blocked.
         """
         now = self._clock()
         async with self._lock:
@@ -280,7 +279,6 @@ class SSEBroadcaster:
                     >= self.settings.max_lifetime_seconds
                 ):
                     self._request_close_locked(subscription, "max_lifetime")
-                    self._remove_locked(subscription)
 
     def _assert_capacity_locked(
         self,

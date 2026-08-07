@@ -198,7 +198,7 @@ async def test_each_admission_quota_fails_atomically(settings, expected_scope):
 
 
 @pytest.mark.asyncio
-async def test_max_lifetime_signals_close_and_reclaims_quota():
+async def test_max_lifetime_retains_quota_until_generator_teardown():
     now = [10.0]
     broadcaster = SSEBroadcaster(
         SSESettings(
@@ -221,6 +221,15 @@ async def test_max_lifetime_signals_close_and_reclaims_quota():
     await broadcaster.expire_connections()
     assert subscription.close_event.is_set()
     assert subscription.close_reason == "max_lifetime"
+    assert await broadcaster.total_connection_count() == 1
+    assert (await broadcaster.metrics_snapshot())["closed_total"] == {}
+
+    with pytest.raises(ConnectionQuotaExceeded) as caught:
+        await add(broadcaster)
+    assert caught.value.scope == "global"
+
+    # The response generator owns teardown and releases actual resource quota.
+    await broadcaster.remove_connection(subscription)
     assert await broadcaster.total_connection_count() == 0
     assert (await broadcaster.metrics_snapshot())["closed_total"] == {
         "max_lifetime": 1
@@ -228,14 +237,6 @@ async def test_max_lifetime_signals_close_and_reclaims_quota():
 
     replacement = await add(broadcaster)
     assert await broadcaster.total_connection_count() == 1
-
-    # A generator exiting after maintenance reclaimed its subscription must not
-    # decrement counters or record the close a second time.
-    await broadcaster.remove_connection(subscription)
-    assert await broadcaster.total_connection_count() == 1
-    assert (await broadcaster.metrics_snapshot())["closed_total"] == {
-        "max_lifetime": 1
-    }
     await broadcaster.remove_connection(replacement)
 
 
