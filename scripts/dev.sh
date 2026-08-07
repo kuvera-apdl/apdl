@@ -112,6 +112,7 @@ cmd_setup() {
     require node   "Install Node.js >= 20"
     require docker "Install Docker Desktop"
     require curl   "Install curl"
+    require python3 "Install Python 3.12"
     ok "uv $(uv --version 2>&1 | head -1)"
     ok "node $(node --version)"
     ok "docker $(docker --version | cut -d' ' -f3 | tr -d ',')"
@@ -123,6 +124,8 @@ cmd_setup() {
     else
         ok ".env already exists"
     fi
+    python3 "$ROOT_DIR/scripts/llm_vault_key.py" ensure "$ROOT_DIR/.env"
+    ok "Local LLM vault encryption key is provisioned"
 
     setup_python_package "Ingestion Service" "$ROOT_DIR/services/ingestion"
     setup_python_package "Config Service"    "$ROOT_DIR/services/config"

@@ -203,7 +203,7 @@ services:
       - "8086"
     environment:
       POSTGRES_URL: postgresql://apdl_llm_vault:${APDL_LLM_VAULT_POSTGRES_PASSWORD:-apdl_llm_vault_dev}@postgres:5432/apdl
-      LLM_VAULT_ENCRYPTION_KEY_BASE64: ${LLM_VAULT_ENCRYPTION_KEY_BASE64:-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=}
+      LLM_VAULT_ENCRYPTION_KEY_BASE64: ${LLM_VAULT_ENCRYPTION_KEY_BASE64:-}
       LLM_VAULT_ADMIN_TOKEN: ${LLM_VAULT_ADMIN_TOKEN:-local-llm-vault-admin-token-change-me}
       LLM_VAULT_AGENTS_TOKEN: ${LLM_VAULT_AGENTS_TOKEN:-local-llm-vault-agents-token-change-me}
       LLM_VAULT_CODEGEN_TOKEN: ${LLM_VAULT_CODEGEN_TOKEN:-local-llm-vault-codegen-token-change-me}

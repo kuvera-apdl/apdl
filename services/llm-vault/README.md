@@ -26,7 +26,8 @@ plaintext over the private service network.
 
 Generate production tokens independently and generate the encryption key with
 `openssl rand -base64 32`. Do not reuse a workload token as the admin or
-projection token.
+projection token. Local `make setup` generates the key once and preserves it on
+later setup runs; deployments must provision their own independent value.
 
 ## API boundaries
 
