@@ -11,6 +11,7 @@ from tempfile import TemporaryDirectory
 from uuid import UUID
 
 import pytest
+from pydantic import ValidationError
 
 from app.editor import routed as routed_module
 from app.editor.base import EditRequest, EditResult
@@ -20,7 +21,9 @@ from app.llm.broker import (
     LlmAttemptBroker,
     LlmBrokerClient,
     _AcquireRequest,
+    _FinishRequest,
     _SuccessResponse,
+    _round_claimed_cost_usd_micros,
 )
 from app.llm.broker_directory import prepare_broker_root
 from app.llm.contracts import (
@@ -95,6 +98,53 @@ def test_plaintext_lease_is_serialized_but_omitted_from_repr() -> None:
 
     assert SECRET in response.model_dump_json()
     assert SECRET not in repr(response)
+
+
+def test_broker_v2_accepts_only_canonical_claimed_usage_fields() -> None:
+    canonical = {
+        "schema_version": "codegen_llm_broker_request@2",
+        "action": "finish",
+        "token": "t" * 43,
+        "changeset_id": "changeset-1",
+        "attempt_id": ATTEMPT_ID,
+        "status": "succeeded",
+        "claimed_latency_ms": 12,
+        "claimed_input_tokens": 9,
+        "claimed_output_tokens": 20,
+        "error_classification": None,
+    }
+
+    parsed = _FinishRequest.model_validate(canonical)
+    assert parsed.claimed_input_tokens == 9
+    with pytest.raises(ValidationError):
+        _FinishRequest.model_validate(
+            {**canonical, "schema_version": "codegen_llm_broker_request@1"}
+        )
+    legacy = {
+        key: value
+        for key, value in canonical.items()
+        if not key.startswith("claimed_")
+    }
+    legacy.update(latency_ms=12, input_tokens=9, output_tokens=20)
+    with pytest.raises(ValidationError):
+        _FinishRequest.model_validate(legacy)
+
+
+@pytest.mark.parametrize(
+    ("numerator", "expected"),
+    [
+        (1, 0),
+        (499_999, 0),
+        (500_000, 1),
+        (1_499_999, 1),
+        (1_500_000, 2),
+    ],
+)
+def test_claimed_cost_rounds_to_nearest_micro(
+    numerator: int,
+    expected: int,
+) -> None:
+    assert _round_claimed_cost_usd_micros(numerator) == expected
 
 
 def _execution_snapshot() -> LlmExecutionSnapshot:
@@ -209,7 +259,7 @@ async def test_broker_acquire_terminalizes_registered_attempt_before_unwind(
         allowed_phases=("brief", "edit", "review"),
     )
     request = _AcquireRequest(
-        schema_version="codegen_llm_broker_request@1",
+        schema_version="codegen_llm_broker_request@2",
         action="acquire",
         token="t" * 43,
         changeset_id="changeset-1",
@@ -296,8 +346,8 @@ async def test_broker_unix_socket_acquire_finish_round_trip(
                 started_at,
                 status="succeeded",
                 error_classification=None,
-                input_tokens=10,
-                output_tokens=20,
+                claimed_input_tokens=9,
+                claimed_output_tokens=20,
             )
         finally:
             await broker.close()
@@ -307,13 +357,48 @@ async def test_broker_unix_socket_acquire_finish_round_trip(
         {
             "attempt_id": ATTEMPT_ID,
             "status": "succeeded",
-            "latency_ms": 0,
-            "input_tokens": 10,
-            "output_tokens": 20,
-            "cost_usd_micros": 43,
+            "claimed_latency_ms": 0,
+            "claimed_input_tokens": 9,
+            "claimed_output_tokens": 20,
+            "claimed_cost_usd_micros": 42,
             "error_classification": None,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_controller_abandonment_does_not_invent_usage_claims() -> None:
+    statements: list[str] = []
+
+    class Connection:
+        async def execute(self, query: str, *args: object) -> None:
+            statements.append(query)
+
+    class Acquisition:
+        async def __aenter__(self) -> Connection:
+            return Connection()
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+    class Pool:
+        def acquire(self) -> Acquisition:
+            return Acquisition()
+
+    await llm_routing.abandon_llm_attempt(
+        Pool(),
+        attempt_id=ATTEMPT_ID,
+        cancelled=False,
+    )
+
+    assert len(statements) == 1
+    for field in (
+        "claimed_latency_ms",
+        "claimed_input_tokens",
+        "claimed_output_tokens",
+        "claimed_cost_usd_micros",
+    ):
+        assert field not in statements[0]
 
 
 @pytest.mark.asyncio
@@ -575,6 +660,32 @@ def test_snapshot_sql_requires_canonical_integer_json_numbers() -> None:
             f"assignment->>'{field}'\n"
             "        ) ~ '^(0|[1-9][0-9]*)$'"
         ) in assignment_migration
+
+    for field in (
+        "claimed_latency_ms",
+        "claimed_input_tokens",
+        "claimed_output_tokens",
+        "claimed_cost_usd_micros",
+    ):
+        assert field in assignment_migration
+    for legacy_field in (
+        "latency_ms",
+        "input_tokens",
+        "output_tokens",
+        "cost_usd_micros",
+    ):
+        assert (
+            re.search(
+                rf"(?<!claimed_)\b{legacy_field}\b",
+                assignment_migration,
+            )
+            is None
+        )
+    assert "Untrusted worker claim" in assignment_migration
+    assert (
+        "error_classification IS NOT NULL\n"
+        "            AND error_classification = 'cancelled'"
+    ) in assignment_migration
 
 
 def test_runtime_queries_never_row_lock_read_only_vault_authority() -> None:

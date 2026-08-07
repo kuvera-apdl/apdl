@@ -46,6 +46,7 @@ from app.store.llm_routing import (
 MAX_BROKER_MESSAGE_BYTES = 32 * 1024
 _BROKER_CHILD = re.compile(r"^[0-9a-f]{24}$")
 _BROKER_SOCKET_NAME = "broker.sock"
+_TOKENS_PER_MILLION = 1_000_000
 
 TerminalStatus = Literal["succeeded", "failed", "cancelled"]
 ErrorClassification = Literal[
@@ -63,6 +64,11 @@ ErrorClassification = Literal[
 
 class LlmBrokerError(RuntimeError):
     """Secret-free broker protocol or authority failure."""
+
+
+def _round_claimed_cost_usd_micros(numerator: int) -> int:
+    """Round a token-rate numerator to the nearest micro-dollar."""
+    return (numerator + (_TOKENS_PER_MILLION // 2)) // _TOKENS_PER_MILLION
 
 
 async def _await_terminal_cleanup(cleanup: asyncio.Task[None]) -> None:
@@ -85,7 +91,7 @@ class _StrictModel(BaseModel):
 
 
 class _AcquireRequest(_StrictModel):
-    schema_version: Literal["codegen_llm_broker_request@1"]
+    schema_version: Literal["codegen_llm_broker_request@2"]
     action: Literal["acquire"]
     token: StrictStr = Field(min_length=43, max_length=128, repr=False)
     changeset_id: StrictStr = Field(min_length=1, max_length=128)
@@ -93,21 +99,29 @@ class _AcquireRequest(_StrictModel):
 
 
 class _FinishRequest(_StrictModel):
-    schema_version: Literal["codegen_llm_broker_request@1"]
+    schema_version: Literal["codegen_llm_broker_request@2"]
     action: Literal["finish"]
     token: StrictStr = Field(min_length=43, max_length=128, repr=False)
     changeset_id: StrictStr = Field(min_length=1, max_length=128)
     attempt_id: UUID
     status: TerminalStatus
-    latency_ms: int = Field(ge=0)
-    input_tokens: int | None = Field(default=None, ge=0, le=10_000_000_000)
-    output_tokens: int | None = Field(default=None, ge=0, le=10_000_000_000)
+    claimed_latency_ms: int = Field(ge=0)
+    claimed_input_tokens: int | None = Field(
+        default=None, ge=0, le=10_000_000_000
+    )
+    claimed_output_tokens: int | None = Field(
+        default=None, ge=0, le=10_000_000_000
+    )
     error_classification: ErrorClassification | None
 
     @model_validator(mode="after")
     def require_complete_usage(self) -> _FinishRequest:
-        if (self.input_tokens is None) != (self.output_tokens is None):
-            raise ValueError("input and output token usage must be supplied together")
+        if (self.claimed_input_tokens is None) != (
+            self.claimed_output_tokens is None
+        ):
+            raise ValueError(
+                "claimed input and output token usage must be supplied together"
+            )
         return self
 
 
@@ -400,23 +414,26 @@ class LlmAttemptBroker:
             attempt = self._active.get(request.attempt_id)
         if attempt is None:
             raise LlmBrokerError("LLM attempt is not active")
-        cost_usd_micros: int | None = None
-        if request.input_tokens is not None and request.output_tokens is not None:
+        claimed_cost_usd_micros: int | None = None
+        if (
+            request.claimed_input_tokens is not None
+            and request.claimed_output_tokens is not None
+        ):
             numerator = (
-                request.input_tokens
+                request.claimed_input_tokens
                 * attempt.binding.input_cost_per_million_tokens_usd_micros
-                + request.output_tokens
+                + request.claimed_output_tokens
                 * attempt.binding.output_cost_per_million_tokens_usd_micros
             )
-            cost_usd_micros = (numerator + 999_999) // 1_000_000
+            claimed_cost_usd_micros = _round_claimed_cost_usd_micros(numerator)
         await finish_llm_attempt(
             self._pool,
             attempt_id=attempt.attempt_id,
             status=request.status,
-            latency_ms=request.latency_ms,
-            input_tokens=request.input_tokens,
-            output_tokens=request.output_tokens,
-            cost_usd_micros=cost_usd_micros,
+            claimed_latency_ms=request.claimed_latency_ms,
+            claimed_input_tokens=request.claimed_input_tokens,
+            claimed_output_tokens=request.claimed_output_tokens,
+            claimed_cost_usd_micros=claimed_cost_usd_micros,
             error_classification=request.error_classification,
         )
         async with self._lock:
@@ -525,7 +542,7 @@ class LlmBrokerClient:
     async def acquire(self, phase: Phase) -> tuple[LlmAttemptLease, float]:
         response = await self._exchange(
             {
-                "schema_version": "codegen_llm_broker_request@1",
+                "schema_version": "codegen_llm_broker_request@2",
                 "action": "acquire",
                 "token": self._authority.token,
                 "changeset_id": self._changeset_id,
@@ -543,21 +560,23 @@ class LlmBrokerClient:
         *,
         status: TerminalStatus,
         error_classification: ErrorClassification | None,
-        input_tokens: int | None = None,
-        output_tokens: int | None = None,
+        claimed_input_tokens: int | None = None,
+        claimed_output_tokens: int | None = None,
     ) -> None:
-        latency_ms = max(0, round((time.monotonic() - started_at) * 1000))
+        claimed_latency_ms = max(
+            0, round((time.monotonic() - started_at) * 1000)
+        )
         response = await self._exchange(
             {
-                "schema_version": "codegen_llm_broker_request@1",
+                "schema_version": "codegen_llm_broker_request@2",
                 "action": "finish",
                 "token": self._authority.token,
                 "changeset_id": self._changeset_id,
                 "attempt_id": str(lease.attempt_id),
                 "status": status,
-                "latency_ms": latency_ms,
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
+                "claimed_latency_ms": claimed_latency_ms,
+                "claimed_input_tokens": claimed_input_tokens,
+                "claimed_output_tokens": claimed_output_tokens,
                 "error_classification": error_classification,
             }
         )

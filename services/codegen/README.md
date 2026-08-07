@@ -460,6 +460,12 @@ use an explicitly unfiltered bridge and therefore do not provide that secret
 containment. Offline mode cannot create changesets, and trusted in-process
 execution is restricted to that non-publishing mode.
 
+The attempt ledger records worker-claimed latency and token counts. Codegen
+derives a claimed cost from the assignment's snapshotted rates, rounded to the
+nearest micro-dollar. The current proxy does not measure provider usage, so
+these fields are informational evidence only and must not drive billing,
+budgets, or policy enforcement.
+
 Build and validate the three runtime images, apply migrations, then start the
 tenant overlay:
 
