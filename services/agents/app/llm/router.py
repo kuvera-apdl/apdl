@@ -1,8 +1,11 @@
-"""Multi-provider LLM router with fallback — OpenAI, Anthropic, Google, and local models.
+"""Multi-provider LLM router with governed fallback.
 
 Tier 1 (fast): High-throughput, lower-cost tasks — summarisation, classification,
                UI config generation.
 Tier 2 (reasoning): Complex analysis, experiment design, feature proposals.
+
+Supported providers are OpenAI, Anthropic, Google, xAI, and local
+OpenAI-compatible models.
 
 Each request is authorized, budgeted, and recorded in PostgreSQL before any
 provider egress. Fallback happens only for classified retryable failures and
@@ -76,10 +79,11 @@ _REQUEST_TIMEOUT = float(os.getenv("LLM_REQUEST_TIMEOUT_SECONDS", "120"))
 _openai_client: openai.AsyncOpenAI | None = None
 _anthropic_client: anthropic.AsyncAnthropic | None = None
 _google_client: genai.Client | None = None
+_xai_client: openai.AsyncOpenAI | None = None
 _local_client: openai.AsyncOpenAI | None = None
 
 _MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
-_PROVIDERS = ("openai", "anthropic", "google", "local")
+_PROVIDERS = ("openai", "anthropic", "google", "xai", "local")
 
 
 @dataclass(frozen=True)
@@ -116,6 +120,8 @@ def _provider_endpoint_url(provider: str) -> str:
         value = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
     elif provider == "google":
         value = "https://generativelanguage.googleapis.com"
+    elif provider == "xai":
+        value = "https://api.x.ai/v1"
     elif provider == "local":
         value = os.getenv("LOCAL_LLM_URL", "")
     else:
@@ -132,6 +138,7 @@ def provider_runtime_configuration(provider: str) -> ProviderRuntimeConfiguratio
             "openai": "OPENAI_API_KEY",
             "anthropic": "ANTHROPIC_API_KEY",
             "google": "GOOGLE_API_KEY",
+            "xai": "XAI_API_KEY",
             "local": "LOCAL_LLM_URL",
         }[provider]
         raise ValueError(f"{credential} is required for provider {provider}")
@@ -145,6 +152,11 @@ def provider_runtime_configuration(provider: str) -> ProviderRuntimeConfiguratio
     elif provider == "google":
         fast_model = os.getenv("LLM_FAST_GOOGLE", "gemini-2.5-flash-lite")
         reasoning_model = os.getenv("LLM_REASONING_GOOGLE", "gemini-2.5-flash")
+    elif provider == "xai":
+        fast_model = os.getenv(
+            "LLM_FAST_XAI", "grok-4.20-0309-non-reasoning"
+        )
+        reasoning_model = os.getenv("LLM_REASONING_XAI", "grok-4.5")
     else:
         fast_model = reasoning_model = os.getenv("LOCAL_LLM_MODEL", "gemma4")
 
@@ -192,6 +204,17 @@ def _get_google() -> genai.Client:
             http_options=genai_types.HttpOptions(timeout=int(_REQUEST_TIMEOUT * 1000)),
         )
     return _google_client
+
+
+def _get_xai() -> openai.AsyncOpenAI:
+    global _xai_client
+    if _xai_client is None:
+        _xai_client = openai.AsyncOpenAI(
+            api_key=os.getenv("XAI_API_KEY", ""),
+            base_url=_provider_endpoint_url("xai"),
+            timeout=_REQUEST_TIMEOUT,
+        )
+    return _xai_client
 
 
 def _get_local() -> openai.AsyncOpenAI:
@@ -252,6 +275,8 @@ def _provider_available(provider: str) -> bool:
         return bool(os.getenv("ANTHROPIC_API_KEY", "").strip())
     if provider == "google":
         return bool(os.getenv("GOOGLE_API_KEY", "").strip())
+    if provider == "xai":
+        return bool(os.getenv("XAI_API_KEY", "").strip())
     if provider == "local":
         # Candidate only when its endpoint is explicitly configured. Project
         # policy still authorizes the exact local model before any request.
@@ -416,6 +441,25 @@ async def _google_completion(
     )
 
 
+async def _xai_completion(
+    model: str,
+    messages: list[dict[str, str]],
+    **kwargs: Any,
+) -> TextCompletion:
+    # xAI's Chat Completions endpoint implements the OpenAI wire contract,
+    # including usage fields and client-side function calling.
+    client = _get_xai()
+    resp = await client.chat.completions.create(
+        model=model, messages=messages, **kwargs
+    )
+    input_tokens, output_tokens = _usage_tokens(getattr(resp, "usage", None))
+    return TextCompletion(
+        text=resp.choices[0].message.content or "",
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+    )
+
+
 async def _local_completion(
     model: str,
     messages: list[dict[str, str]],
@@ -437,6 +481,7 @@ _PROVIDER_FN = {
     "openai": _openai_completion,
     "anthropic": _anthropic_completion,
     "google": _google_completion,
+    "xai": _xai_completion,
     "local": _local_completion,
 }
 
@@ -509,7 +554,7 @@ async def _route_with_fallback(
     if not models:
         message = (
             f"No LLM providers are configured for tier {model_tier!r}; set a "
-            "provider credential or LOCAL_LLM_URL"
+            "supported provider credential or LOCAL_LLM_URL"
         )
         await finish_llm_call(
             context,
@@ -1156,6 +1201,8 @@ async def chat_completion_with_tools(
             client = _get_anthropic()
         elif provider == "google":
             client = _get_google()
+        elif provider == "xai":
+            client = _get_xai()
         else:  # local — OpenAI-compatible servers speak the tools dialect
             client = _get_local()
 

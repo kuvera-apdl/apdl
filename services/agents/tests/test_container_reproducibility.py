@@ -54,3 +54,23 @@ def test_compose_healthcheck_uses_core_readiness_only() -> None:
     assert "http://localhost:8083/ready" in agents_service
     assert "['status'] == 'ready'" in agents_service
     assert "/ready/capabilities" not in agents_service
+
+
+def test_compose_and_example_forward_xai_credential_to_agents() -> None:
+    compose = (REPO_ROOT / "infra" / "docker" / "docker-compose.yml").read_text(
+        encoding="utf-8"
+    )
+    agents_service = compose.split("\n  agents:\n", 1)[1].split(
+        "\n  # Codegen", 1
+    )[0]
+    env_example = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+
+    assert "XAI_API_KEY: ${XAI_API_KEY:-}" in agents_service
+    assert (
+        "LLM_FAST_XAI: ${LLM_FAST_XAI:-grok-4.20-0309-non-reasoning}"
+        in agents_service
+    )
+    assert "LLM_REASONING_XAI: ${LLM_REASONING_XAI:-grok-4.5}" in agents_service
+    assert "\nXAI_API_KEY=\n" in env_example
+    assert "\nLLM_FAST_XAI=grok-4.20-0309-non-reasoning\n" in env_example
+    assert "\nLLM_REASONING_XAI=grok-4.5\n" in env_example

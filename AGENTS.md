@@ -229,7 +229,7 @@ The PostgreSQL `apdl` owner is migration-only; long-running services use the
 non-owner `apdl_runtime` role.
 
 Agents service requires at least one of `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
-`GOOGLE_API_KEY`, or `LOCAL_LLM_URL` for LLM access.
+`GOOGLE_API_KEY`, `XAI_API_KEY`, or `LOCAL_LLM_URL` for LLM access.
 
 ## graphify (knowledge graph)
 

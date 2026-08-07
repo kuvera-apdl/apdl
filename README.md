@@ -203,7 +203,7 @@ the agent loop): [docs/architecture.md](docs/architecture.md).
 | Ingestion Service | Python 3.12, FastAPI, Redis Streams, Pydantic |
 | Config Service | Python 3.12, FastAPI, asyncpg, Redis, SSE, Pydantic |
 | Query Service | Python 3.12, FastAPI, ClickHouse, SciPy, NumPy |
-| Agents Service | Python 3.12, FastAPI, OpenAI/Anthropic/Google GenAI SDKs, pgvector |
+| Agents Service | Python 3.12, FastAPI, OpenAI/Anthropic/Google GenAI SDKs, xAI via the OpenAI-compatible API, pgvector |
 | Event Pipeline | Redis Streams writer |
 | Analytics Store | ClickHouse (MergeTree, materialized views) |
 | Config Store | PostgreSQL 16 + pgvector |

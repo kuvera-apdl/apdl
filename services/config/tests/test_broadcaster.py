@@ -198,10 +198,16 @@ async def test_each_admission_quota_fails_atomically(settings, expected_scope):
 
 
 @pytest.mark.asyncio
-async def test_max_lifetime_signals_observable_close():
+async def test_max_lifetime_signals_close_and_reclaims_quota():
     now = [10.0]
     broadcaster = SSEBroadcaster(
-        SSESettings(max_lifetime_seconds=5.0),
+        SSESettings(
+            max_connections=1,
+            max_connections_per_project=1,
+            max_connections_per_credential=1,
+            max_connections_per_ip=1,
+            max_lifetime_seconds=5.0,
+        ),
         clock=lambda: now[0],
     )
     subscription = await add(broadcaster)
@@ -209,12 +215,28 @@ async def test_max_lifetime_signals_observable_close():
     now[0] = 14.9
     await broadcaster.expire_connections()
     assert not subscription.close_event.is_set()
+    assert await broadcaster.total_connection_count() == 1
 
     now[0] = 15.0
     await broadcaster.expire_connections()
     assert subscription.close_event.is_set()
     assert subscription.close_reason == "max_lifetime"
+    assert await broadcaster.total_connection_count() == 0
+    assert (await broadcaster.metrics_snapshot())["closed_total"] == {
+        "max_lifetime": 1
+    }
+
+    replacement = await add(broadcaster)
+    assert await broadcaster.total_connection_count() == 1
+
+    # A generator exiting after maintenance reclaimed its subscription must not
+    # decrement counters or record the close a second time.
     await broadcaster.remove_connection(subscription)
+    assert await broadcaster.total_connection_count() == 1
+    assert (await broadcaster.metrics_snapshot())["closed_total"] == {
+        "max_lifetime": 1
+    }
+    await broadcaster.remove_connection(replacement)
 
 
 @pytest.mark.parametrize(

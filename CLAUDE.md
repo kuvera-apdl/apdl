@@ -171,7 +171,7 @@ CLICKHOUSE_NATIVE_URL=clickhouse://apdl:apdl_dev@localhost:9000/apdl
 The PostgreSQL `apdl` owner is migration-only; long-running services use the
 non-owner `apdl_runtime` role.
 
-Agents service requires at least one of `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, or `LOCAL_LLM_URL` for LLM access.
+Agents service requires at least one of `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `XAI_API_KEY`, or `LOCAL_LLM_URL` for LLM access.
 
 ## graphify (knowledge graph skill)
 

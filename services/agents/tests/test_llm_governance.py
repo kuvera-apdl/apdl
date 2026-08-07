@@ -213,6 +213,65 @@ async def test_actual_usage_is_audited_before_plain_content_is_returned(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_xai_plain_completion_uses_the_governed_provider_path(monkeypatch):
+    provider = _provider("xai", "grok-reviewed")
+    recorder = _GovernanceRecorder(_policy(provider))
+    recorder.install(monkeypatch)
+    monkeypatch.setattr(
+        router,
+        "_tier_models",
+        lambda tier: [_candidate("xai", "grok-reviewed")],
+    )
+
+    class Completions:
+        async def create(self, **kwargs):
+            assert kwargs["model"] == "grok-reviewed"
+            return type(
+                "Response",
+                (),
+                {
+                    "choices": [
+                        type(
+                            "Choice",
+                            (),
+                            {
+                                "message": type(
+                                    "Message", (), {"content": "grok answer"}
+                                )()
+                            },
+                        )()
+                    ],
+                    "usage": type(
+                        "Usage",
+                        (),
+                        {"prompt_tokens": 13, "completion_tokens": 5},
+                    )(),
+                },
+            )()
+
+    client = type(
+        "Client",
+        (),
+        {
+            "chat": type(
+                "Chat",
+                (),
+                {"completions": Completions()},
+            )()
+        },
+    )()
+    monkeypatch.setattr(router, "_get_xai", lambda: client)
+
+    answer = await router.chat_completion("reasoning", _MESSAGES, context=_context())
+
+    assert answer == "grok answer"
+    assert "attempt:1:prepared:xai/grok-reviewed" in recorder.events
+    assert recorder.attempt_finishes[0]["input_tokens"] == 13
+    assert recorder.attempt_finishes[0]["output_tokens"] == 5
+    assert recorder.call_finishes[-1]["status"] == "succeeded"
+
+
+@pytest.mark.asyncio
 async def test_unknown_provider_error_is_nonretryable(monkeypatch):
     openai_policy = _provider("openai", "model-a")
     anthropic_policy = _provider("anthropic", "model-b")

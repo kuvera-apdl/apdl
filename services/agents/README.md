@@ -104,12 +104,30 @@ latency, outcome, and retry classification without storing prompt content.
 
 Migration 023 creates one safe default policy for every project: only the exact
 local model `gemma4` at `http://localhost:11434/v1`, local residency, zero paid
-spend, and no cross-vendor retry. Enabling OpenAI, Anthropic, or Google requires an operator to update
-`llm_project_policies` and insert the exact provider/model row in
-`llm_project_provider_policies`, including allowed data classifications,
-residency, current input/output prices, and positive project-daily and per-run
-ceilings. A provider failure crosses to another vendor only when the project
-policy explicitly permits it and the failure is classified as retryable.
+spend, and no cross-vendor retry. Enabling OpenAI, Anthropic, Google, or xAI
+requires an operator to update `llm_project_policies` and insert the exact
+provider/model row in `llm_project_provider_policies`, including allowed data
+classifications, residency, current input/output prices, and positive
+project-daily and per-run ceilings. A provider failure crosses to another vendor
+only when the project policy explicitly permits it and the failure is classified
+as retryable.
+
+### Connect xAI/Grok
+
+1. Apply PostgreSQL migrations with `make migrate-postgres`.
+2. Set `XAI_API_KEY` in `.env`. The default candidates are
+   `grok-4.20-0309-non-reasoning` for `fast` and `grok-4.5` for `reasoning`;
+   override them only with `LLM_FAST_XAI` and `LLM_REASONING_XAI`.
+3. Run `make provision-agents-llm-policy ARGS="--help"` and provision the
+   project with `--provider xai`, the exact current token prices, residency,
+   classifications, and positive spend ceilings.
+4. Confirm process-level configuration and reachability at
+   `GET /ready/capabilities`. Project authorization remains a separate,
+   fail-closed policy check on every request.
+
+xAI is integrated through its OpenAI-compatible Chat Completions endpoint. That
+supports APDL's client-side function-calling loop; xAI-hosted search, code, and
+MCP tools are not enabled by this provider adapter.
 
 ## Approval and safety boundary
 
@@ -190,8 +208,9 @@ no enabled built-in or custom-agent catalog entry can invoke it in 0.3.0.
 | `OPENAI_API_KEY` | — | OpenAI provider |
 | `ANTHROPIC_API_KEY` | — | Anthropic provider |
 | `GOOGLE_API_KEY` | — | Google provider |
+| `XAI_API_KEY` | — | xAI Grok provider at `https://api.x.ai/v1` |
 | `LOCAL_LLM_URL` | — | OpenAI-compatible local server (e.g. Ollama at `http://localhost:11434/v1`) |
-| `LOCAL_LLM_MODEL` / `LLM_FAST_*` / `LLM_REASONING_*` | per-tier defaults | Candidate model names; each exact provider/model must also be authorized by project policy |
+| `LOCAL_LLM_MODEL` / `LLM_FAST_*` / `LLM_REASONING_*` | per-tier defaults | Candidate model names, including `LLM_FAST_XAI` (`grok-4.20-0309-non-reasoning`) and `LLM_REASONING_XAI` (`grok-4.5`); each exact provider/model must also be authorized by project policy |
 | `EMBEDDING_MODEL` | `BAAI/bge-small-en-v1.5` | Local fastembed model (dimension must be known or set via `EMBEDDING_DIMENSIONS`) |
 | `APDL_SERVICE_API_KEYS` | — | Production project-to-key JSON for scoped Config/Query/Codegen calls |
 | `APDL_DEV_API_KEY` | — | Local-only fallback key when the service-key map is unset |

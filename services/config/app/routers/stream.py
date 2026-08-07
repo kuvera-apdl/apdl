@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 
+import anyio
 from fastapi import APIRouter, HTTPException, Request, status
 from sse_starlette import EventSourceResponse, ServerSentEvent
 
@@ -198,24 +199,30 @@ async def _event_generator(
     except asyncio.CancelledError:
         raise
     finally:
-        pending = [
-            task
-            for task in (update_task, authority_timer)
-            if task is not None and not task.done()
-        ]
-        for task in pending:
-            task.cancel()
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
-        await broadcaster.remove_connection(
-            subscription,
-            reason=terminal_reason or "client_disconnect",
-        )
-        logger.debug(
-            "SSE connection %s disconnected for project %s",
-            subscription.connection_id,
-            subscription.project_id,
-        )
+        # EventSourceResponse cancels its task group when the transport emits
+        # http.disconnect. AnyIO cancellation is level-triggered, so every
+        # await in an unshielded finally block is cancelled again. Shield the
+        # complete cleanup boundary or the in-memory admission record leaks
+        # after the socket has already gone away.
+        with anyio.CancelScope(shield=True):
+            pending = [
+                task
+                for task in (update_task, authority_timer)
+                if task is not None and not task.done()
+            ]
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            await broadcaster.remove_connection(
+                subscription,
+                reason=terminal_reason or "client_disconnect",
+            )
+            logger.debug(
+                "SSE connection %s disconnected for project %s",
+                subscription.connection_id,
+                subscription.project_id,
+            )
 
 
 async def _next_update(subscription: SSESubscription) -> ProjectEvent | None:

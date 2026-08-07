@@ -110,11 +110,22 @@ def _args(**overrides):
 def _configure_openai(monkeypatch) -> None:
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
     monkeypatch.delenv("LOCAL_LLM_URL", raising=False)
     monkeypatch.setenv("OPENAI_API_KEY", "super-secret-provider-key")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://llm.example.test/v1/")
     monkeypatch.setenv("LLM_FAST_PRIMARY", "fast-reviewed-v1")
     monkeypatch.setenv("LLM_REASONING_PRIMARY", "reasoning-reviewed-v2")
+
+
+def _configure_xai(monkeypatch) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("LOCAL_LLM_URL", raising=False)
+    monkeypatch.setenv("XAI_API_KEY", "xai-secret-provider-key")
+    monkeypatch.setenv("LLM_FAST_XAI", "grok-fast-reviewed")
+    monkeypatch.setenv("LLM_REASONING_XAI", "grok-reasoning-reviewed")
 
 
 def _compact_sql(connection: FakeConnection) -> list[str]:
@@ -154,6 +165,44 @@ def test_runtime_endpoint_rejects_secret_bearing_url_components(monkeypatch, suf
         router.provider_runtime_configuration("openai")
 
 
+def test_xai_runtime_configuration_is_router_and_cli_shared_authority(monkeypatch):
+    _configure_xai(monkeypatch)
+
+    configuration = router.provider_runtime_configuration("xai")
+
+    assert configuration == router.ProviderRuntimeConfiguration(
+        provider="xai",
+        endpoint_url="https://api.x.ai/v1",
+        fast_model="grok-fast-reviewed",
+        reasoning_model="grok-reasoning-reviewed",
+    )
+    assert router._tier_models("fast") == [
+        {
+            "provider": "xai",
+            "model": "grok-fast-reviewed",
+            "endpoint_url": "https://api.x.ai/v1",
+        }
+    ]
+    assert router._tier_models("reasoning") == [
+        {
+            "provider": "xai",
+            "model": "grok-reasoning-reviewed",
+            "endpoint_url": "https://api.x.ai/v1",
+        }
+    ]
+
+
+def test_xai_runtime_defaults_preserve_fast_and_reasoning_tiers(monkeypatch):
+    _configure_xai(monkeypatch)
+    monkeypatch.delenv("LLM_FAST_XAI", raising=False)
+    monkeypatch.delenv("LLM_REASONING_XAI", raising=False)
+
+    configuration = router.provider_runtime_configuration("xai")
+
+    assert configuration.fast_model == "grok-4.20-0309-non-reasoning"
+    assert configuration.reasoning_model == "grok-4.5"
+
+
 @pytest.mark.asyncio
 async def test_missing_provider_credential_fails_before_database_connect(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
@@ -166,6 +215,20 @@ async def test_missing_provider_credential_fails_before_database_connect(monkeyp
 
     with pytest.raises(SystemExit, match="OPENAI_API_KEY is required"):
         await provision_llm_policy.provision(_args())
+
+
+@pytest.mark.asyncio
+async def test_missing_xai_credential_fails_before_database_connect(monkeypatch):
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
+    monkeypatch.setenv("POSTGRES_URL", "postgresql://operator-test")
+
+    async def unexpected_connect(_dsn: str):
+        raise AssertionError("credential validation must happen before PostgreSQL")
+
+    monkeypatch.setattr(provision_llm_policy.asyncpg, "connect", unexpected_connect)
+
+    with pytest.raises(SystemExit, match="XAI_API_KEY is required"):
+        await provision_llm_policy.provision(_args(provider="xai"))
 
 
 @pytest.mark.asyncio
@@ -355,6 +418,23 @@ def test_local_policy_deduplicates_one_exact_model(monkeypatch):
 
     assert len(replacement.provider_policies) == 1
     assert replacement.provider_policies[0].model == "local-reviewed"
+
+
+def test_xai_policy_replacement_uses_exact_tier_models(monkeypatch):
+    _configure_xai(monkeypatch)
+
+    replacement = provision_llm_policy.validate_replacement(
+        _args(provider="xai")
+    )
+
+    assert replacement.required_data_residency == "ca"
+    assert [
+        (policy.provider, policy.model, policy.endpoint_url)
+        for policy in replacement.provider_policies
+    ] == [
+        ("xai", "grok-fast-reviewed", "https://api.x.ai/v1"),
+        ("xai", "grok-reasoning-reviewed", "https://api.x.ai/v1"),
+    ]
 
 
 def test_remote_policy_requires_https_endpoint(monkeypatch):

@@ -176,6 +176,101 @@ async def test_openai_forced_text_keeps_tools_and_disables_new_calls():
 
 
 @pytest.mark.asyncio
+async def test_xai_plain_completion_uses_openai_compatible_response(monkeypatch):
+    class Completions:
+        kwargs: dict | None = None
+
+        async def create(self, **kwargs):
+            self.kwargs = kwargs
+            message = SimpleNamespace(content="grok answer")
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=message)],
+                usage=SimpleNamespace(prompt_tokens=21, completion_tokens=8),
+            )
+
+    completions = Completions()
+    client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    monkeypatch.setattr(router, "_get_xai", lambda: client)
+
+    assert router._PROVIDER_FN["xai"] is router._xai_completion
+    result = await router._xai_completion(
+        "grok-test",
+        _MESSAGES[:2],
+        max_tokens=321,
+        temperature=0.2,
+    )
+
+    assert result == router.TextCompletion(
+        "grok answer",
+        input_tokens=21,
+        output_tokens=8,
+    )
+    assert completions.kwargs == {
+        "model": "grok-test",
+        "messages": _MESSAGES[:2],
+        "max_tokens": 321,
+        "temperature": 0.2,
+    }
+
+
+@pytest.mark.asyncio
+async def test_xai_tool_route_uses_xai_client_and_openai_wire(monkeypatch):
+    sentinel_client = object()
+    captured: dict = {}
+
+    async def route(model_tier, *, invoke, **kwargs):
+        del model_tier, kwargs
+        return await invoke("xai", "grok-tool-test", {"max_tokens": 123})
+
+    async def completion_tools(
+        model,
+        messages,
+        tools,
+        client,
+        *,
+        force_text=False,
+        **kwargs,
+    ):
+        captured.update(
+            {
+                "model": model,
+                "messages": messages,
+                "tools": tools,
+                "client": client,
+                "force_text": force_text,
+                "kwargs": kwargs,
+            }
+        )
+        return router.ToolCompletion("grok tool answer")
+
+    def unexpected_local_client():
+        raise AssertionError("xAI must not use the local provider client")
+
+    monkeypatch.setattr(router, "_route_with_fallback", route)
+    monkeypatch.setattr(router, "_get_xai", lambda: sentinel_client)
+    monkeypatch.setattr(router, "_get_local", unexpected_local_client)
+    monkeypatch.setattr(router, "_openai_completion_tools", completion_tools)
+
+    result = await router.chat_completion_with_tools(
+        "reasoning",
+        _MESSAGES,
+        _TOOLS,
+        context=object(),
+        force_text=True,
+    )
+
+    assert result.text == "grok tool answer"
+    assert captured == {
+        "model": "grok-tool-test",
+        "messages": _MESSAGES,
+        "tools": _TOOLS,
+        "client": sentinel_client,
+        "force_text": True,
+        "kwargs": {"max_tokens": 123},
+    }
+
+
+@pytest.mark.asyncio
 async def test_anthropic_forced_text_keeps_tools_for_historical_tool_blocks():
     class Messages:
         kwargs: dict | None = None

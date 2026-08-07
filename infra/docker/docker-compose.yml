@@ -207,6 +207,9 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      XAI_API_KEY: ${XAI_API_KEY:-}
+      LLM_FAST_XAI: ${LLM_FAST_XAI:-grok-4.20-0309-non-reasoning}
+      LLM_REASONING_XAI: ${LLM_REASONING_XAI:-grok-4.5}
       LOCAL_LLM_URL: ${LOCAL_LLM_URL:-}
     healthcheck:
       test:

@@ -15,6 +15,7 @@ async def test_capability_report_separates_configuration_and_reachability(
     monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
     monkeypatch.delenv("LOCAL_LLM_URL", raising=False)
     monkeypatch.setenv("QUERY_SERVICE_URL", "http://query.test:8082")
     monkeypatch.setenv("CONFIG_SERVICE_URL", "http://config.test:8081")
@@ -50,6 +51,7 @@ async def test_capability_report_separates_configuration_and_reachability(
         "openai": {"configured": True, "reachable": True},
         "anthropic": {"configured": False, "reachable": False},
         "google": {"configured": False, "reachable": False},
+        "xai": {"configured": False, "reachable": False},
         "local": {"configured": False, "reachable": False},
     }
     assert capabilities["query"] == {"configured": True, "reachable": True}
@@ -70,6 +72,7 @@ async def test_generic_report_accepts_tenant_scoped_codegen_as_healthy(
     monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
     monkeypatch.delenv("LOCAL_LLM_URL", raising=False)
 
     async def reachable(*_args, **_kwargs):
@@ -88,6 +91,43 @@ async def test_generic_report_accepts_tenant_scoped_codegen_as_healthy(
     report = await readiness.capability_report()
 
     assert report["status"] == "available"
+
+
+@pytest.mark.asyncio
+async def test_xai_readiness_uses_models_endpoint_without_leaking_key(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("LOCAL_LLM_URL", raising=False)
+    monkeypatch.setenv("XAI_API_KEY", "xai-secret")
+    monkeypatch.setenv("QUERY_SERVICE_URL", "")
+    monkeypatch.setenv("CONFIG_SERVICE_URL", "")
+    monkeypatch.setenv("CODEGEN_SERVICE_URL", "")
+
+    probes: list[tuple[str, dict[str, str]]] = []
+
+    async def fake_probe(client, url, *, headers=None):
+        del client
+        probes.append((url, headers or {}))
+        return True
+
+    monkeypatch.setattr(readiness, "_probe_endpoint", fake_probe)
+
+    report = await readiness.capability_report()
+
+    assert probes == [
+        (
+            "https://api.x.ai/v1/models",
+            {"Authorization": "Bearer xai-secret"},
+        )
+    ]
+    assert report["capabilities"]["llm"]["providers"]["xai"] == {
+        "configured": True,
+        "reachable": True,
+    }
+    assert "xai-secret" not in str(report)
 
 
 @pytest.mark.asyncio

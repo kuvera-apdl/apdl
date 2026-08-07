@@ -8,8 +8,8 @@ from typing import Any
 from app.memory.embeddings import EMBEDDING_DIMENSIONS
 
 
-MIGRATION_VERSION = 37
-MIGRATION_NAME = "037_llm_policy_operator_audit.sql"
+MIGRATION_VERSION = 45
+MIGRATION_NAME = "045_xai_llm_provider.sql"
 REQUIRED_COLUMNS = frozenset(
     {
         ("admin_projects", "created_by"),

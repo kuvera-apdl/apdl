@@ -5,6 +5,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 SQL = (ROOT / "pipeline/postgres/migrations/023_llm_governance.sql").read_text()
+XAI_SQL = (
+    ROOT / "pipeline/postgres/migrations/045_xai_llm_provider.sql"
+).read_text()
 
 
 def test_llm_governance_separates_logical_calls_and_provider_attempts():
@@ -41,3 +44,15 @@ def test_llm_governance_budget_reservation_has_project_and_run_indexes():
     assert "llm_provider_attempts_project_budget_idx" in SQL
     assert "llm_provider_attempts_run_budget_idx" in SQL
     assert "reserved_cost_usd_micros BIGINT NOT NULL" in SQL
+
+
+def test_xai_provider_is_admitted_to_policy_and_attempt_ledgers():
+    assert "ALTER TABLE llm_project_provider_policies" in XAI_SQL
+    assert "DROP CONSTRAINT llm_project_provider_name_check" in XAI_SQL
+    assert "ADD CONSTRAINT llm_project_provider_name_check" in XAI_SQL
+    assert "ALTER TABLE llm_provider_attempts" in XAI_SQL
+    assert "DROP CONSTRAINT llm_provider_attempts_provider_check" in XAI_SQL
+    assert "ADD CONSTRAINT llm_provider_attempts_provider_check" in XAI_SQL
+    assert XAI_SQL.count(
+        "provider IN ('openai', 'anthropic', 'google', 'xai', 'local')"
+    ) == 2

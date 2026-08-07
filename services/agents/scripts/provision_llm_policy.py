@@ -21,7 +21,7 @@ from app.llm.router import ProviderRuntimeConfiguration, provider_runtime_config
 MAINTENANCE_INHIBITOR_LOCK_ID = 4_158_044_083
 MAINTENANCE_GUARD_LOCK_ID = 4_158_044_084
 PROJECT_ID = re.compile(r"^[A-Za-z0-9]{1,64}$")
-PROVIDERS = ("openai", "anthropic", "google", "local")
+PROVIDERS = ("openai", "anthropic", "google", "xai", "local")
 RESIDENCIES = ("local", "ca", "us", "eu", "global")
 DATA_CLASSIFICATIONS = ("public", "internal", "confidential", "restricted")
 MAX_PRICE_USD_MICROS = 1_000_000_000_000
@@ -174,7 +174,9 @@ def validate_replacement(args: argparse.Namespace) -> PolicyReplacement:
 
     provider = str(args.provider)
     if provider not in PROVIDERS:
-        raise SystemExit("--provider must be openai, anthropic, google, or local")
+        raise SystemExit(
+            "--provider must be openai, anthropic, google, xai, or local"
+        )
     residency = str(args.data_residency)
     if residency not in RESIDENCIES:
         raise SystemExit("--data-residency must be local, ca, us, eu, or global")

@@ -8,6 +8,13 @@ for its published SDKs. APDL remains a pre-1.0 developer preview.
 
 ## [Unreleased]
 
+### Added
+
+- Added policy-governed xAI/Grok support to Agents, including separate fast and
+  reasoning model candidates, OpenAI-compatible function calling, readiness
+  probing, operator provisioning, audited provider-attempt storage, and Docker
+  configuration.
+
 ## [0.3.4] - 2026-07-29
 
 ### Changed

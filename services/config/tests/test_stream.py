@@ -336,6 +336,45 @@ async def test_slow_consumer_observes_close_then_reconnects_to_full_snapshot(
 
 
 @pytest.mark.asyncio
+async def test_transport_disconnect_releases_admission_capacity(
+    monkeypatch,
+    route_state,
+):
+    broadcaster = SSEBroadcaster()
+    app.state.broadcaster = broadcaster
+    monkeypatch.setattr(
+        stream.pg_store,
+        "get_flag_snapshot",
+        AsyncMock(return_value=([make_flag(version=1)], 1)),
+    )
+
+    request = make_request()
+    response = await stream.sse_stream(request)
+    initial_body_sent = asyncio.Event()
+
+    async def receive():
+        await initial_body_sent.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        if (
+            message["type"] == "http.response.body"
+            and b"event: config" in message.get("body", b"")
+        ):
+            initial_body_sent.set()
+
+    await asyncio.wait_for(
+        response(request.scope, receive, send),
+        timeout=1,
+    )
+
+    assert await broadcaster.total_connection_count() == 0
+    assert (await broadcaster.metrics_snapshot())["closed_total"] == {
+        "client_disconnect": 1
+    }
+
+
+@pytest.mark.asyncio
 async def test_snapshot_failure_releases_admission_capacity(monkeypatch, route_state):
     broadcaster = SSEBroadcaster()
     app.state.broadcaster = broadcaster

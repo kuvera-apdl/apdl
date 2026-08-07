@@ -12,7 +12,7 @@ from uuid import UUID
 import asyncpg
 
 
-ProviderName = Literal["openai", "anthropic", "google", "local"]
+ProviderName = Literal["openai", "anthropic", "google", "xai", "local"]
 DataClassification = Literal["public", "internal", "confidential", "restricted"]
 ExecutionKind = Literal["agent_run", "custom_agent_test"]
 ErrorClassification = Literal[

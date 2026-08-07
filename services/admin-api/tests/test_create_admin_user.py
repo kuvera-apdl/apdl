@@ -276,7 +276,7 @@ def test_container_and_make_target_ship_the_operator_cli() -> None:
     assert "COPY scripts/create_admin_user.py scripts/create_admin_user.py" in dockerfile
     assert "scripts/*\n!scripts/create_admin_user.py\n" in dockerignore
     assert "$(COMPOSE) run --rm --build --no-deps admin-api" in target
-    assert "python scripts/create_admin_user.py $(ARGS)" in target
+    assert "python -m scripts.create_admin_user $(ARGS)" in target
     assert ".venv/bin/python" not in target
 
 

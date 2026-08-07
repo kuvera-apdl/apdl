@@ -116,6 +116,7 @@ def _provider_probes() -> dict[str, dict[str, Any]]:
     openai_key = os.getenv("OPENAI_API_KEY", "").strip()
     anthropic_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
     google_key = os.getenv("GOOGLE_API_KEY", "").strip()
+    xai_key = os.getenv("XAI_API_KEY", "").strip()
     local_url = os.getenv("LOCAL_LLM_URL", "").strip()
 
     return {
@@ -142,6 +143,11 @@ def _provider_probes() -> dict[str, dict[str, Any]]:
             "configured": bool(google_key),
             "url": "https://generativelanguage.googleapis.com/v1beta/models",
             "headers": {"x-goog-api-key": google_key},
+        },
+        "xai": {
+            "configured": bool(xai_key),
+            "url": "https://api.x.ai/v1/models",
+            "headers": {"Authorization": f"Bearer {xai_key}"},
         },
         "local": {
             "configured": bool(local_url),
