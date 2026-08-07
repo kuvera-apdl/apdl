@@ -82,3 +82,22 @@ def test_project_routing_binds_tiers_and_attempts_to_exact_credentials():
     assert "llm_provider_attempts_credential_binding_check" in sql
     assert "llm_provider_attempts_protect_credential_binding" in sql
     assert "'credential_unavailable'" in sql
+
+
+def test_project_routing_terminalizes_live_unbound_attempts_before_validation():
+    sql = PROJECT_CREDENTIAL_ROUTING_SQL
+
+    terminalize_position = sql.index("WITH live_unbound_attempts AS")
+    legacy_position = sql.index("SET legacy_unbound_credential = TRUE")
+    constraint_position = sql.index(
+        "ADD CONSTRAINT llm_provider_attempts_credential_binding_check"
+    )
+
+    assert terminalize_position < legacy_position < constraint_position
+    assert "status IN ('prepared', 'in_flight')" in sql[terminalize_position:]
+    assert "WHEN live.previous_status = 'prepared' THEN 'blocked'" in sql
+    assert "ELSE 'cancelled'" in sql
+    assert "ELSE attempt.reserved_cost_usd_micros" in sql
+    assert "AND status IN ('succeeded', 'failed', 'cancelled', 'blocked')" in sql
+    assert "WITH affected_calls AS" in sql
+    assert "Migration cancelled an active provider attempt" in sql

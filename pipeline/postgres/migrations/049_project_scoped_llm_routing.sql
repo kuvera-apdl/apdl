@@ -62,10 +62,86 @@ ALTER TABLE llm_provider_attempts
 ALTER TABLE llm_provider_attempts
     ADD COLUMN legacy_unbound_credential BOOLEAN NOT NULL DEFAULT FALSE;
 
+-- Migration quiescence stops Agents before applying this file, which can leave
+-- prepared attempts with a live lease or in-flight attempts whose provider
+-- outcome is unknown. Preserve the same conservative accounting used by the
+-- runtime reconciler before requiring every live row to have a credential
+-- binding: pre-egress reservations are released, while in-flight reservations
+-- are charged in full.
+WITH live_unbound_attempts AS (
+    SELECT attempt_id, status AS previous_status
+    FROM llm_provider_attempts
+    WHERE provider <> 'local'
+      AND credential_id IS NULL
+      AND status IN ('prepared', 'in_flight')
+    FOR UPDATE
+)
+UPDATE llm_provider_attempts AS attempt
+SET status = CASE
+        WHEN live.previous_status = 'prepared' THEN 'blocked'
+        ELSE 'cancelled'
+    END,
+    charged_cost_usd_micros = CASE
+        WHEN live.previous_status = 'prepared' THEN 0
+        ELSE attempt.reserved_cost_usd_micros
+    END,
+    retryable = FALSE,
+    error_classification = 'cancelled',
+    error_message = CASE
+        WHEN live.previous_status = 'prepared'
+            THEN 'Migration cancelled attempt before provider egress'
+        ELSE 'Migration cancelled attempt with provider outcome unknown'
+    END,
+    completed_at = NOW()
+FROM live_unbound_attempts AS live
+WHERE attempt.attempt_id = live.attempt_id;
+
 UPDATE llm_provider_attempts
 SET legacy_unbound_credential = TRUE
 WHERE provider <> 'local'
-  AND credential_id IS NULL;
+  AND credential_id IS NULL
+  AND status IN ('succeeded', 'failed', 'cancelled', 'blocked');
+
+-- Keep the logical ledger consistent with the attempts terminalized above.
+-- A call remains active only when another attempt is still active.
+WITH affected_calls AS (
+    SELECT call.call_id
+    FROM llm_calls AS call
+    WHERE call.status IN ('prepared', 'in_flight')
+      AND EXISTS (
+          SELECT 1
+          FROM llm_provider_attempts AS legacy_attempt
+          WHERE legacy_attempt.call_id = call.call_id
+            AND legacy_attempt.legacy_unbound_credential
+      )
+      AND NOT EXISTS (
+          SELECT 1
+          FROM llm_provider_attempts AS active_attempt
+          WHERE active_attempt.call_id = call.call_id
+            AND active_attempt.status IN ('prepared', 'in_flight')
+      )
+    FOR UPDATE OF call
+), totals AS (
+    SELECT affected.call_id,
+           COALESCE(SUM(attempt.input_tokens), 0)::INTEGER AS input_tokens,
+           COALESCE(SUM(attempt.output_tokens), 0)::INTEGER AS output_tokens,
+           COALESCE(SUM(attempt.charged_cost_usd_micros), 0)::BIGINT
+               AS cost_usd_micros
+    FROM affected_calls AS affected
+    LEFT JOIN llm_provider_attempts AS attempt
+      ON attempt.call_id = affected.call_id
+    GROUP BY affected.call_id
+)
+UPDATE llm_calls AS call
+SET status = 'cancelled',
+    input_tokens = totals.input_tokens,
+    output_tokens = totals.output_tokens,
+    cost_usd_micros = totals.cost_usd_micros,
+    error_classification = 'cancelled',
+    error_message = 'Migration cancelled an active provider attempt',
+    completed_at = NOW()
+FROM totals
+WHERE call.call_id = totals.call_id;
 
 ALTER TABLE llm_provider_attempts
     ADD CONSTRAINT llm_provider_attempts_credential_binding_check CHECK (
