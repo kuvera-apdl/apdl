@@ -105,6 +105,7 @@ CREATE TABLE admin_project_membership_audit (
                 'invitation_revoke',
                 'invitation_accept',
                 'roles_replace',
+                'activation_grant',
                 'member_remove'
             )
         ),
@@ -166,6 +167,17 @@ CREATE TABLE admin_project_membership_audit (
             AND previous_roles IS NOT NULL
             AND new_roles IS NOT NULL
             AND previous_roles <> new_roles
+        )
+        OR (
+            action = 'activation_grant'
+            AND invitation_id IS NULL
+            AND subject_user_id = actor_user_id
+            AND previous_roles IS NOT NULL
+            AND new_roles IS NOT NULL
+            AND previous_roles <> new_roles
+            AND new_roles = apdl_canonical_admin_roles(
+                previous_roles || ARRAY['agents:run', 'agents:manage']::TEXT[]
+            )
         )
         OR (
             action = 'member_remove'

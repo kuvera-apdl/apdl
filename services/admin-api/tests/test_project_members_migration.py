@@ -50,9 +50,13 @@ def test_invitation_and_membership_history_is_immutable() -> None:
         "'invitation_revoke'",
         "'invitation_accept'",
         "'roles_replace'",
+        "'activation_grant'",
         "'member_remove'",
     ):
         assert action in SQL_047
+    assert "action = 'activation_grant'" in SQL_047
+    assert "subject_user_id = actor_user_id" in SQL_047
+    assert "previous_roles || ARRAY['agents:run', 'agents:manage']::TEXT[]" in SQL_047
     assert "apdl_validate_project_invitation_update" in SQL_047
     assert "admin_project_invitations_no_delete" in SQL_047
     assert "admin_project_invitations_no_truncate" in SQL_047

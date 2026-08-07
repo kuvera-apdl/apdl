@@ -160,6 +160,7 @@ export const membershipAuditEntrySchema = z
       'invitation_revoke',
       'invitation_accept',
       'roles_replace',
+      'activation_grant',
       'member_remove',
     ]),
     actor_user_id: uuidSchema,

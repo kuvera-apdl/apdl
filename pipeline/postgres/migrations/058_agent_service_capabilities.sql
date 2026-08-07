@@ -424,7 +424,7 @@ BEGIN
         new_roles
     ) VALUES (
         candidate_project_id,
-        'roles_replace',
+        'activation_grant',
         candidate_actor_user_id,
         candidate_actor_user_id,
         actor_email,

@@ -389,6 +389,13 @@ describe('Agentic runs setup wizard', () => {
 
     const dialog = await screen.findByRole('dialog')
     await reachSetupReview(dialog)
+    expect(
+      within(dialog).getByText(
+        /First activation grants your project membership agents:run and agents:manage\./,
+      ),
+    ).toHaveTextContent(
+      'This one-time grant is not restored by later reconfiguration if either role is removed.',
+    )
     await userEvent.click(
       within(dialog).getByRole('button', {
         name: 'Activate Agentic runs',

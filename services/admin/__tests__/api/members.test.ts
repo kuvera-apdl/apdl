@@ -100,6 +100,13 @@ describe('project membership schemas', () => {
       membershipAuditEntrySchema.safeParse(MEMBERSHIP_AUDIT_ENTRY).success,
     ).toBe(true)
     expect(
+      membershipAuditEntrySchema.safeParse({
+        ...MEMBERSHIP_AUDIT_ENTRY,
+        action: 'activation_grant',
+        actor_user_id: MEMBERSHIP_AUDIT_ENTRY.subject_user_id,
+      }).success,
+    ).toBe(true)
+    expect(
       membershipAuditPageSchema.safeParse({
         entries: [MEMBERSHIP_AUDIT_ENTRY],
         next_cursor: AUDIT_CURSOR,
@@ -173,6 +180,12 @@ describe('project membership schemas', () => {
       }).success,
     ).toBe(false)
     expect(membershipAuditPageSchema.safeParse([MEMBERSHIP_AUDIT_ENTRY]).success).toBe(false)
+    expect(
+      membershipAuditEntrySchema.safeParse({
+        ...MEMBERSHIP_AUDIT_ENTRY,
+        action: 'setup_activation',
+      }).success,
+    ).toBe(false)
     expect(
       membershipAuditPageSchema.safeParse({
         entries: [MEMBERSHIP_AUDIT_ENTRY],

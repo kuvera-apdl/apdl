@@ -39,6 +39,7 @@ MembershipAuditAction = Literal[
     "invitation_revoke",
     "invitation_accept",
     "roles_replace",
+    "activation_grant",
     "member_remove",
 ]
 InvitationBlockedReason = Literal[

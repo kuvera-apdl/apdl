@@ -27,6 +27,7 @@ MIGRATION = (
     / "migrations"
     / "051_agents_project_setup.sql"
 )
+MIGRATION_058 = MIGRATION.with_name("058_agent_service_capabilities.sql")
 
 
 class _Transaction:
@@ -240,6 +241,43 @@ async def test_first_owner_activation_adds_analysis_roles_only(
         for query, args in conn.executed
         if "pg_advisory_xact_lock" in query
     )
+
+
+@pytest.mark.asyncio
+async def test_later_reconfiguration_does_not_restore_removed_analysis_roles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = _SetupConn(policy_state="active", policy_version=4)
+    store = AgentsSetupStore(_Pool(conn))
+
+    async def fake_get(project_id: str, *, actor_user_id: UUID | None) -> object:
+        return object()
+
+    monkeypatch.setattr(store, "get", fake_get)
+    await store.put(
+        "demo",
+        fast_model=_selection(),
+        reasoning_model=_selection(),
+        expected_version=4,
+        actor_user_id=ACTOR_ID,
+    )
+
+    assert not any(
+        "apdl_agents_grant_owner_execution_roles" in query
+        for operation, query, _args in conn.operations
+        if operation == "fetchval"
+    )
+
+
+def test_first_activation_role_grant_has_a_distinct_audit_action() -> None:
+    sql = MIGRATION_058.read_text(encoding="utf-8")
+    function = sql[
+        sql.index("CREATE FUNCTION public.apdl_agents_grant_owner_execution_roles") :
+        sql.index("CREATE FUNCTION public.apdl_consume_agent_service_capability")
+    ]
+
+    assert "'activation_grant'" in function
+    assert "'roles_replace'" not in function
 
 
 @pytest.mark.asyncio
