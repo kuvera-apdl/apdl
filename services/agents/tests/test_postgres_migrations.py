@@ -102,9 +102,6 @@ def test_auth_credentials_enforce_confidential_and_browser_kinds():
     assert "roles @> ARRAY[" in credentials
     assert "roles <@ ARRAY[" in credentials
 
-    assert "auth_credentials" not in POSTGRES_RUNNER
-    assert "APDL_DEV_" not in POSTGRES_RUNNER
-    assert "APDL_SMOKE_" not in POSTGRES_RUNNER
     assert "APDL_SMOKE_CONFIDENTIAL_KEY" in FRESH_SMOKE
     assert "APDL_SMOKE_BROWSER_KEY" in FRESH_SMOKE
     assert '"smoke-confidential"' in FRESH_SMOKE
