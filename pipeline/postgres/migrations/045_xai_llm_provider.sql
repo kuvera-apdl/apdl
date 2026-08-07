@@ -6,11 +6,14 @@
 -- provider policy.
 
 ALTER TABLE llm_project_provider_policies
-    DROP CONSTRAINT llm_project_provider_name_check,
+    DROP CONSTRAINT IF EXISTS llm_project_provider_name_check,
     ADD CONSTRAINT llm_project_provider_name_check
         CHECK (provider IN ('openai', 'anthropic', 'google', 'xai', 'local'));
 
 ALTER TABLE llm_provider_attempts
-    DROP CONSTRAINT llm_provider_attempts_provider_check,
+    DROP CONSTRAINT IF EXISTS llm_provider_attempts_provider_check,
     ADD CONSTRAINT llm_provider_attempts_provider_check
-        CHECK (provider IN ('openai', 'anthropic', 'google', 'xai', 'local'));
+        CHECK (provider IN ('openai', 'anthropic', 'google', 'xai', 'local'))
+        NOT VALID;
+ALTER TABLE llm_provider_attempts
+    VALIDATE CONSTRAINT llm_provider_attempts_provider_check;

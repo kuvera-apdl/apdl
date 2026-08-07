@@ -49,13 +49,21 @@ def test_llm_governance_budget_reservation_has_project_and_run_indexes():
     assert "reserved_cost_usd_micros BIGINT NOT NULL" in SQL
 
 
-def test_xai_provider_is_admitted_to_policy_and_attempt_ledgers():
+def test_xai_provider_is_admitted_with_lock_safe_attempt_validation():
     assert "ALTER TABLE llm_project_provider_policies" in XAI_SQL
-    assert "DROP CONSTRAINT llm_project_provider_name_check" in XAI_SQL
+    assert "DROP CONSTRAINT IF EXISTS llm_project_provider_name_check" in XAI_SQL
     assert "ADD CONSTRAINT llm_project_provider_name_check" in XAI_SQL
     assert "ALTER TABLE llm_provider_attempts" in XAI_SQL
-    assert "DROP CONSTRAINT llm_provider_attempts_provider_check" in XAI_SQL
+    assert (
+        "DROP CONSTRAINT IF EXISTS llm_provider_attempts_provider_check" in XAI_SQL
+    )
     assert "ADD CONSTRAINT llm_provider_attempts_provider_check" in XAI_SQL
+    add_position = XAI_SQL.index("ADD CONSTRAINT llm_provider_attempts_provider_check")
+    not_valid_position = XAI_SQL.index("NOT VALID", add_position)
+    validate_position = XAI_SQL.index(
+        "VALIDATE CONSTRAINT llm_provider_attempts_provider_check"
+    )
+    assert add_position < not_valid_position < validate_position
     assert XAI_SQL.count(
         "provider IN ('openai', 'anthropic', 'google', 'xai', 'local')"
     ) == 2
