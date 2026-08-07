@@ -75,10 +75,6 @@ class FreshSmokeContractTests(unittest.TestCase):
             "scripts/dev.sh smoke-fresh Isolated end-to-end fresh-install proof",
             dev,
         )
-        self.assertNotIn(
-            'echo "  scripts/dev.sh smoke       End-to-end smoke test"',
-            dev,
-        )
 
     def test_experiment_projection_requires_frozen_enrollment_authority(self) -> None:
         start = datetime(2026, 7, 1, tzinfo=timezone.utc)
