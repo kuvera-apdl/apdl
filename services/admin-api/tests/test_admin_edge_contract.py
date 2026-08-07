@@ -83,6 +83,7 @@ def test_compose_fails_closed_while_local_example_enables_bounded_onboarding() -
         "APDL_ADMIN_MAX_PROJECTS_PER_USER: "
         "${APDL_ADMIN_MAX_PROJECTS_PER_USER:-5}"
     ) in compose
+    assert "APDL_BIND_ADDRESS=127.0.0.1" in environment
     assert "APDL_ADMIN_REGISTRATION_ENABLED=true" in environment
     assert "APDL_ADMIN_MAX_ACCOUNTS=100" in environment
     assert "APDL_ADMIN_MAX_PROJECTS_PER_USER=5" in environment
