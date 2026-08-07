@@ -25,6 +25,8 @@ def test_owner_is_separate_from_creator_and_requires_an_active_manager() -> None
     assert "admin_user_projects_protect_owner" in SQL_046
     assert "admin_users_protect_active_owner" in SQL_046
     assert "admin_projects_require_human_owner" in SQL_046
+    assert "FOR SHARE OF account, membership" in SQL_046
+    assert "FOR KEY SHARE OF account, membership" not in SQL_046
 
 
 def test_ownership_audit_is_immutable() -> None:
