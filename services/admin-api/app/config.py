@@ -154,6 +154,9 @@ class Settings:
     login_global_rate_limit: int
     login_network_rate_limit: int
     login_device_rate_limit: int
+    invitation_global_rate_limit: int
+    invitation_network_rate_limit: int
+    invitation_token_rate_limit: int
     login_progressive_failure_threshold: int
     login_progressive_base_delay_seconds: int
     login_progressive_max_delay_seconds: int
@@ -232,6 +235,15 @@ class Settings:
             login_device_rate_limit=_positive_int(
                 "APDL_ADMIN_LOGIN_DEVICE_RATE_LIMIT", "20"
             ),
+            invitation_global_rate_limit=_positive_int(
+                "APDL_ADMIN_INVITATION_GLOBAL_RATE_LIMIT", "600"
+            ),
+            invitation_network_rate_limit=_positive_int(
+                "APDL_ADMIN_INVITATION_NETWORK_RATE_LIMIT", "30"
+            ),
+            invitation_token_rate_limit=_positive_int(
+                "APDL_ADMIN_INVITATION_TOKEN_RATE_LIMIT", "20"
+            ),
             login_progressive_failure_threshold=_positive_int(
                 "APDL_ADMIN_LOGIN_PROGRESSIVE_FAILURE_THRESHOLD", "3"
             ),
@@ -276,6 +288,14 @@ class Settings:
             raise ValueError(
                 "APDL_ADMIN_LOGIN_GLOBAL_RATE_LIMIT must be at least "
                 "the network and device limits"
+            )
+        if settings.invitation_global_rate_limit < max(
+            settings.invitation_network_rate_limit,
+            settings.invitation_token_rate_limit,
+        ):
+            raise ValueError(
+                "APDL_ADMIN_INVITATION_GLOBAL_RATE_LIMIT must be at least "
+                "the network and token limits"
             )
         if (
             settings.cookie_secure

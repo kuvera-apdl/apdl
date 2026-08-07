@@ -73,6 +73,9 @@ def test_settings_allow_both_local_console_ports_by_default(monkeypatch) -> None
     assert settings.max_projects_per_user == 5
     assert settings.login_progressive_failure_threshold == 3
     assert settings.login_account_notice_threshold == 50
+    assert settings.invitation_global_rate_limit == 600
+    assert settings.invitation_network_rate_limit == 30
+    assert settings.invitation_token_rate_limit == 20
     assert settings.stream_authority_check_seconds == 5.0
     assert settings.upstream_read_timeout_seconds == 60.0
     assert settings.readiness_probe_timeout_seconds == 2.0
@@ -138,6 +141,16 @@ def test_settings_reject_short_login_risk_secret(monkeypatch) -> None:
     monkeypatch.setenv("APDL_ADMIN_LOGIN_RISK_HMAC_KEY", "too-short")
 
     with pytest.raises(ValueError, match="at least 32 bytes"):
+        Settings.from_env()
+
+
+def test_settings_reject_incoherent_invitation_rate_limits(monkeypatch) -> None:
+    monkeypatch.setenv("APDL_SERVICE_API_KEYS", "{}")
+    monkeypatch.setenv("APDL_ADMIN_COOKIE_SECURE", "false")
+    monkeypatch.setenv("APDL_ADMIN_INVITATION_GLOBAL_RATE_LIMIT", "1")
+    monkeypatch.setenv("APDL_ADMIN_INVITATION_NETWORK_RATE_LIMIT", "2")
+
+    with pytest.raises(ValueError, match="network and token limits"):
         Settings.from_env()
 
 

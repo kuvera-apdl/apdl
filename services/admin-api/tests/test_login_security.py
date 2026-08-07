@@ -10,6 +10,7 @@ from fastapi import Request, Response
 from app.login_security import (
     DEVICE_COOKIE,
     build_login_source,
+    preflight_invitation_rate_limit,
     preflight_login,
     progressive_delay_seconds,
     resolve_client_ip,
@@ -33,6 +34,9 @@ def _settings(**overrides):
         "login_global_rate_limit": 600,
         "login_network_rate_limit": 30,
         "login_device_rate_limit": 20,
+        "invitation_global_rate_limit": 600,
+        "invitation_network_rate_limit": 30,
+        "invitation_token_rate_limit": 20,
         "login_account_risk_window_seconds": 86_400,
     }
     values.update(overrides)
@@ -188,3 +192,30 @@ async def test_preflight_combines_global_network_device_and_source_limits() -> N
     assert rate_cleanup_args == (now - timedelta(seconds=120),)
     assert "INTERVAL" not in source_cleanup_query
     assert source_cleanup_args == (now - timedelta(seconds=172_800),)
+
+
+@pytest.mark.asyncio
+async def test_invitation_preflight_uses_isolated_rate_buckets() -> None:
+    settings = _settings(
+        invitation_global_rate_limit=100,
+        invitation_network_rate_limit=100,
+        invitation_token_rate_limit=1,
+    )
+    now = datetime.now(timezone.utc)
+    source = build_login_source(
+        _request(peer="198.51.100.5"),
+        "invitation:" + "a" * 64,
+        settings,
+    )
+    conn = _PreflightConnection()
+
+    assert await preflight_invitation_rate_limit(conn, source, settings, now) == 0
+    assert await preflight_invitation_rate_limit(conn, source, settings, now) == 60
+
+    scopes = {scope for scope, _ in conn.bucket_attempts}
+    assert scopes == {
+        "invitation_global",
+        "invitation_network",
+        "invitation_token",
+    }
+    assert scopes.isdisjoint({"global", "network", "device"})

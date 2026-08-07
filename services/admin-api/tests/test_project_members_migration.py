@@ -16,6 +16,19 @@ def test_human_roles_and_invitation_roles_use_one_canonical_order() -> None:
     assert SQL_047.count("roles = apdl_canonical_admin_roles(roles)") >= 2
 
 
+def test_invitations_use_buckets_isolated_from_login_rate_limits() -> None:
+    assert "DROP CONSTRAINT admin_login_rate_buckets_scope_check" in SQL_047
+    assert "CHECK (" in SQL_047
+    assert ") NOT VALID;" in SQL_047
+    assert "VALIDATE CONSTRAINT admin_login_rate_buckets_scope_check" in SQL_047
+    for scope in (
+        "'invitation_global'",
+        "'invitation_network'",
+        "'invitation_token'",
+    ):
+        assert scope in SQL_047
+
+
 def test_invitations_are_hash_only_seven_day_single_use_records() -> None:
     invitation_table = SQL_047[
         SQL_047.index("CREATE TABLE admin_project_invitations") :

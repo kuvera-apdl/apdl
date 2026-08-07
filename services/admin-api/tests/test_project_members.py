@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from app import members
 from app.auth import AdminSession, require_session
+from app.login_security import DEVICE_COOKIE
 from app.security import token_hash
 from conftest import make_settings
 
@@ -44,6 +45,8 @@ class MemberConnection:
         self.invitation_row: dict[str, object] | None = None
         self.statements: list[tuple[str, tuple[object, ...]]] = []
         self.audit_calls: list[tuple[object, ...]] = []
+        self.rate_bucket_attempts: dict[tuple[str, str], int] = {}
+        self.rate_bucket_started_at: dict[tuple[str, str], datetime] = {}
 
     @asynccontextmanager
     async def transaction(self):
@@ -52,7 +55,16 @@ class MemberConnection:
     async def fetchrow(self, query: str, *args):
         self.statements.append((query, args))
         if "INSERT INTO admin_login_rate_buckets" in query:
-            return {"window_started_at": NOW, "attempt_count": 1}
+            scope, key_hash, _, now = args
+            key = (str(scope), str(key_hash))
+            self.rate_bucket_attempts[key] = (
+                self.rate_bucket_attempts.get(key, 0) + 1
+            )
+            self.rate_bucket_started_at.setdefault(key, now)
+            return {
+                "window_started_at": self.rate_bucket_started_at[key],
+                "attempt_count": self.rate_bucket_attempts[key],
+            }
         if "AS is_owner" in query and "SELECT" in query:
             if "membership.created_at AS joined_at" in query:
                 return {
@@ -191,9 +203,13 @@ def _client(
     connection: MemberConnection,
     *,
     session: AdminSession | None,
+    settings_overrides: dict[str, object] | None = None,
 ) -> TestClient:
     app = FastAPI()
-    app.state.settings = make_settings(registration_enabled=False)
+    app.state.settings = make_settings(
+        registration_enabled=False,
+        **(settings_overrides or {}),
+    )
     app.state.pg_pool = MemberPool(connection)
     app.include_router(members.router)
     if session is not None:
@@ -334,15 +350,48 @@ def test_wrong_email_and_invalid_lifecycle_use_same_unavailable_response() -> No
     }
 
 
+def test_invitation_rate_limit_does_not_consume_login_buckets() -> None:
+    connection = MemberConnection()
+    with _client(
+        connection,
+        session=None,
+        settings_overrides={
+            "invitation_global_rate_limit": 100,
+            "invitation_network_rate_limit": 100,
+            "invitation_token_rate_limit": 1,
+        },
+    ) as client:
+        accepted = client.get(f"/api/invitations/{RAW_TOKEN}")
+        throttled = client.get(f"/api/invitations/{RAW_TOKEN}")
+
+    assert accepted.status_code == 200
+    assert throttled.status_code == 429
+    assert throttled.headers["Retry-After"] == "60"
+    assert {scope for scope, _ in connection.rate_bucket_attempts} == {
+        "invitation_global",
+        "invitation_network",
+        "invitation_token",
+    }
+
+
 def test_invitation_registration_is_atomic_when_public_registration_is_disabled(
     monkeypatch,
 ) -> None:
     connection = MemberConnection()
+    built_sources = []
+    build_login_source = members.build_login_source
+
+    def record_login_source(*args, **kwargs):
+        source = build_login_source(*args, **kwargs)
+        built_sources.append(source)
+        return source
+
     monkeypatch.setattr(
         members,
         "hash_password",
         lambda password: f"$argon2id${password}",
     )
+    monkeypatch.setattr(members, "build_login_source", record_login_source)
     with _client(connection, session=None) as client:
         registered = client.post(
             f"/api/invitations/{RAW_TOKEN}/register",
@@ -374,6 +423,8 @@ def test_invitation_registration_is_atomic_when_public_registration_is_disabled(
     ]
     assert required_order == sorted(required_order)
     assert "apdl_admin_session" in registered.cookies
+    assert len(built_sources) == 1
+    assert registered.cookies[DEVICE_COOKIE] == built_sources[0].device_token
     assert len(connection.audit_calls) == 1
 
 

@@ -1,6 +1,22 @@
 -- Canonical human memberships, reveal-once project invitations, and immutable
 -- membership lifecycle audit history.
 
+ALTER TABLE admin_login_rate_buckets
+    DROP CONSTRAINT admin_login_rate_buckets_scope_check,
+    ADD CONSTRAINT admin_login_rate_buckets_scope_check
+        CHECK (
+            scope IN (
+                'global',
+                'network',
+                'device',
+                'invitation_global',
+                'invitation_network',
+                'invitation_token'
+            )
+        ) NOT VALID;
+ALTER TABLE admin_login_rate_buckets
+    VALIDATE CONSTRAINT admin_login_rate_buckets_scope_check;
+
 CREATE OR REPLACE FUNCTION apdl_canonical_admin_roles(selected_roles TEXT[])
 RETURNS TEXT[]
 LANGUAGE SQL

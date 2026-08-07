@@ -17,8 +17,9 @@ from app.auth import (
     require_session,
 )
 from app.login_security import (
+    LoginSource,
     build_login_source,
-    preflight_auth_rate_limit,
+    preflight_invitation_rate_limit,
     set_device_cookie,
 )
 from app.models import (
@@ -59,17 +60,23 @@ async def _rate_limit_invitation(
     *,
     request: Request,
     digest: str,
-) -> None:
+) -> LoginSource:
     settings = request.app.state.settings
     now = datetime.now(timezone.utc)
     source = build_login_source(request, f"invitation:{digest}", settings)
-    retry_after = await preflight_auth_rate_limit(conn, source, settings, now)
+    retry_after = await preflight_invitation_rate_limit(
+        conn,
+        source,
+        settings,
+        now,
+    )
     if retry_after > 0:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many invitation attempts. Try again later.",
             headers={"Retry-After": str(retry_after)},
         )
+    return source
 
 
 async def _manager_context(
@@ -840,11 +847,14 @@ async def register_with_invitation(
     if TOKEN_PATTERN.fullmatch(raw_token) is None:
         raise _unavailable_invitation()
     digest = token_hash(raw_token)
-    source = build_login_source(request, f"invitation:{digest}", settings)
 
     async with request.app.state.pg_pool.acquire() as conn:
         async with conn.transaction():
-            await _rate_limit_invitation(conn, request=request, digest=digest)
+            source = await _rate_limit_invitation(
+                conn,
+                request=request,
+                digest=digest,
+            )
             inspection = await _valid_invitation(conn, digest=digest, lock=False)
     if inspection is None:
         raise _unavailable_invitation()
