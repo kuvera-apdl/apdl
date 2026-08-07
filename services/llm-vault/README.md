@@ -38,8 +38,10 @@ their own independent values.
 - Workload access: `POST /internal/v1/credential-access`. The request must name
   the consumer, exact credential ID/version, execution ID, and purpose.
 - Consumer projections: the vault calls the private Agents and Codegen
-  projection endpoints before opening its database transaction. Provider
-  discovery or either requested projection failure leaves all state unchanged.
+  projection endpoints only after a live project-management authority
+  preflight, then revalidates authority inside the persistence transaction.
+  Provider discovery or either requested projection failure leaves all state
+  unchanged.
 
 Migration `056_project_llm_credential_vault.sql` is a fresh-install-only custody
 cutover. Any legacy Agents or Codegen credential row, including replaced or

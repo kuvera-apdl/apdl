@@ -16,6 +16,7 @@ from app.contracts import (
     ConnectionList,
     CredentialAccessResponse,
 )
+from app.store import VaultAuthorizationError
 
 
 ACTOR_ID = UUID("10000000-0000-4000-8000-000000000001")
@@ -52,6 +53,8 @@ class _Store:
     def __init__(self) -> None:
         self.access_calls = []
         self.create_calls = []
+        self.events: list[str] = []
+        self.authority_error: VaultAuthorizationError | None = None
 
     async def list(self, project_id: str, actor_user_id: UUID) -> ConnectionList:
         assert project_id == "demo"
@@ -69,7 +72,17 @@ class _Store:
             api_key="provider-secret",
         )
 
+    async def assert_create_authority(
+        self, *, project_id: str, actor_user_id: UUID
+    ) -> None:
+        assert project_id == "demo"
+        assert actor_user_id == ACTOR_ID
+        self.events.append("authority")
+        if self.authority_error is not None:
+            raise self.authority_error
+
     async def create(self, **kwargs):
+        self.events.append("create")
         self.create_calls.append(kwargs)
         return _detail()
 
@@ -207,15 +220,17 @@ async def test_non_ascii_authentication_headers_fail_closed(
 
 
 @pytest.mark.asyncio
-async def test_create_discovers_and_projects_before_persistence_without_echoing_key(
+async def test_create_validates_authority_before_egress_and_does_not_echo_key(
     configured_app: _Store,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def discover(provider: str, api_key: str) -> tuple[str, ...]:
         assert (provider, api_key) == ("openai", "provider-secret")
+        configured_app.events.append("discovery")
         return ("gpt-5.4-mini",)
 
     async def project(*_args, **_kwargs):
+        configured_app.events.append("projection")
         return {
             "codegen": CodegenProjection(
                 schema_version="codegen_llm_model_projection@1",
@@ -248,4 +263,50 @@ async def test_create_discovers_and_projects_before_persistence_without_echoing_
 
     assert response.status_code == 201, response.text
     assert "provider-secret" not in response.text
+    assert configured_app.events == [
+        "authority",
+        "discovery",
+        "projection",
+        "create",
+    ]
     assert configured_app.create_calls[0]["api_key"] == "provider-secret"
+
+
+@pytest.mark.asyncio
+async def test_create_denies_before_provider_egress(
+    configured_app: _Store,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configured_app.authority_error = VaultAuthorizationError(
+        "Project credential authority is unavailable"
+    )
+
+    async def unexpected_egress(*_args, **_kwargs):
+        configured_app.events.append("unexpected-egress")
+        raise AssertionError("provider egress must not run without authority")
+
+    monkeypatch.setattr(vault_main, "discover_model_ids", unexpected_egress)
+    monkeypatch.setattr(vault_main, "_project_models", unexpected_egress)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=vault_main.app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/v1/llm-connections",
+            headers={
+                "authorization": "Bearer " + "admin-token-" * 3,
+                "x-apdl-project-id": "demo",
+                "x-apdl-actor-user-id": str(ACTOR_ID),
+            },
+            json={
+                "project_id": "demo",
+                "provider": "openai",
+                "label": "Primary",
+                "api_key": "provider-secret",
+                "consumers": ["codegen"],
+            },
+        )
+
+    assert response.status_code == 403
+    assert configured_app.events == ["authority"]
+    assert configured_app.create_calls == []

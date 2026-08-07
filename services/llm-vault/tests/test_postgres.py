@@ -23,7 +23,11 @@ from app.rotation import (
     MAINTENANCE_INHIBITOR_LOCK_ID,
     rotate_active_credentials,
 )
-from app.store import ProjectLlmVaultStore, VaultNotFoundError
+from app.store import (
+    ProjectLlmVaultStore,
+    VaultAuthorizationError,
+    VaultNotFoundError,
+)
 
 
 OWNER_URL = os.getenv("LLM_VAULT_TEST_OWNER_POSTGRES_URL", "").strip() or None
@@ -185,6 +189,52 @@ async def _create_owner_project(project_id: str) -> uuid.UUID:
     finally:
         await conn.close()
     return actor_user_id
+
+
+@pytest.mark.asyncio
+async def test_create_revalidates_authority_after_preflight() -> None:
+    assert OWNER_URL is not None
+    assert VAULT_URL is not None
+    project_id = f"vaultrace{uuid.uuid4().hex}"
+    actor_user_id = await _create_owner_project(project_id)
+    key = bytes(range(32))
+    cipher = CredentialCipher.from_base64(base64.b64encode(key).decode("ascii"))
+    pool = await asyncpg.create_pool(VAULT_URL, min_size=1, max_size=2)
+    store = ProjectLlmVaultStore(pool, cipher)
+    try:
+        await store.assert_create_authority(
+            project_id=project_id,
+            actor_user_id=actor_user_id,
+        )
+        owner = await asyncpg.connect(OWNER_URL)
+        try:
+            await owner.execute(
+                "UPDATE admin_users SET active = FALSE WHERE user_id = $1",
+                actor_user_id,
+            )
+        finally:
+            await owner.close()
+
+        with pytest.raises(VaultAuthorizationError):
+            await store.create(
+                project_id=project_id,
+                provider="openai",
+                label="Primary",
+                api_key="provider-secret",
+                consumers=("codegen",),
+                model_ids=("gpt-5.4-mini",),
+                projections={"codegen": _projection()},
+                actor_user_id=actor_user_id,
+            )
+
+        async with pool.acquire() as conn:
+            connection_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM llm_vault_connections WHERE project_id = $1",
+                project_id,
+            )
+        assert connection_count == 0
+    finally:
+        await pool.close()
 
 
 @pytest.mark.asyncio
