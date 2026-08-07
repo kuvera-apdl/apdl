@@ -51,14 +51,6 @@ import { RolloutFields } from './RolloutFields'
 import { RuleBuilder } from './RuleBuilder'
 import { VariantsEditor } from './VariantsEditor'
 
-const ADVANCED_FORM_FIELDS = new Set<keyof FlagFormValues>([
-  'rules',
-  'fallthrough',
-  'evaluation_mode',
-  'auto_disable',
-  'guardrails',
-])
-
 const WRITABLE_STATES = [
   { value: 'draft', label: 'Draft', hint: 'not served — safe to iterate' },
   { value: 'active', label: 'Active', hint: 'evaluating and serving traffic' },
@@ -157,18 +149,6 @@ function FlagEditor({ flagKey: key }: { flagKey: string | undefined }) {
     if (disclosure) disclosure.open = true
   }
 
-  const revealAdvancedValidationErrors = (
-    errors: typeof formState.errors,
-  ) => {
-    if (
-      Array.from(ADVANCED_FORM_FIELDS).some(
-        (field) => errors[field] !== undefined,
-      )
-    ) {
-      openAdvancedSettings()
-    }
-  }
-
   const confirmSubmit = async () => {
     if (!review) return
     try {
@@ -226,15 +206,7 @@ function FlagEditor({ flagKey: key }: { flagKey: string | undefined }) {
   const openSimulator = async () => {
     const valid = await form.trigger()
     if (!valid) {
-      const parsed = flagFormSchema.safeParse(form.getValues())
-      if (
-        !parsed.success &&
-        parsed.error.issues.some((issue) =>
-          ADVANCED_FORM_FIELDS.has(issue.path[0] as keyof FlagFormValues),
-        )
-      ) {
-        openAdvancedSettings()
-      }
+      openAdvancedSettings()
       toast.error('Fix validation errors before simulating')
       return
     }
@@ -303,7 +275,7 @@ function FlagEditor({ flagKey: key }: { flagKey: string | undefined }) {
               </Button>
               <Button
                 type="button"
-                onClick={handleSubmit(prepareReview, revealAdvancedValidationErrors)}
+                onClick={handleSubmit(prepareReview, openAdvancedSettings)}
               >
                 Review & save
               </Button>
@@ -325,7 +297,7 @@ function FlagEditor({ flagKey: key }: { flagKey: string | undefined }) {
 
         <form
           className="space-y-4"
-          onSubmit={handleSubmit(prepareReview, revealAdvancedValidationErrors)}
+          onSubmit={handleSubmit(prepareReview, openAdvancedSettings)}
           noValidate
         >
           <Section title="Identity">
