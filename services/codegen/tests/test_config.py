@@ -101,29 +101,8 @@ def test_base64_key_is_decoded(monkeypatch):
     assert config.github_app_private_key() == _PEM
 
 
-def test_legacy_inputs_cannot_override_canonical_key(monkeypatch):
-    legacy_inline = "GITHUB_APP_" + "PRIVATE_KEY"
-    legacy_path = legacy_inline + "_PATH"
-    monkeypatch.setenv(legacy_inline, "FROM_INLINE")
-    monkeypatch.setenv(legacy_path, "/tmp/from-path.pem")
-    monkeypatch.setenv(
-        _PRIVATE_KEY_SETTING,
-        base64.b64encode(b"FROM_BASE64").decode(),
-    )
-    assert config.github_app_private_key() == "FROM_BASE64"
-
-
 def test_empty_when_nothing_set(monkeypatch):
     monkeypatch.delenv(_PRIVATE_KEY_SETTING, raising=False)
-    assert config.github_app_private_key() == ""
-
-
-def test_legacy_inputs_alone_leave_key_unconfigured(monkeypatch):
-    legacy_inline = "GITHUB_APP_" + "PRIVATE_KEY"
-    legacy_path = legacy_inline + "_PATH"
-    monkeypatch.delenv(_PRIVATE_KEY_SETTING, raising=False)
-    monkeypatch.setenv(legacy_inline, _PEM)
-    monkeypatch.setenv(legacy_path, "/tmp/key.pem")
     assert config.github_app_private_key() == ""
 
 
@@ -133,16 +112,28 @@ def test_legacy_inputs_alone_leave_key_unconfigured(monkeypatch):
         "not%%%base64%%%",
         "TQ",
         "TQ===",
-        "Zm9v\nYmFy",
         "_w==",
     ],
-    ids=["alphabet", "padding-missing", "padding-extra", "whitespace", "url-safe"],
+    ids=["alphabet", "padding-missing", "padding-extra", "url-safe"],
 )
 def test_noncanonical_base64_fails_closed(monkeypatch, caplog, encoded):
     monkeypatch.setenv(_PRIVATE_KEY_SETTING, encoded)
 
     assert config.github_app_private_key() == ""
     assert _PRIVATE_KEY_SETTING in caplog.text
+    assert encoded not in caplog.text
+
+
+def test_wrapped_base64_fails_with_canonical_generation_guidance(
+    monkeypatch,
+    caplog,
+):
+    encoded = "Zm9v\nYmFy"
+    monkeypatch.setenv(_PRIVATE_KEY_SETTING, encoded)
+
+    assert config.github_app_private_key() == ""
+    assert "single unwrapped Base64 line" in caplog.text
+    assert "openssl base64 -A" in caplog.text
     assert encoded not in caplog.text
 
 

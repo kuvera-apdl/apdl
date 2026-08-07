@@ -281,10 +281,10 @@ openssl base64 -A -in path/to/github-app.private-key.pem
 
 Paste that output directly after `GITHUB_APP_PRIVATE_KEY_BASE64=` in the
 untracked `.env` file. Base64 is transport encoding, not encryption: restrict
-access to `.env` like the original PEM and never commit either one. This is a
-breaking configuration change; deployments that previously supplied an inline
-PEM or a PEM file path must encode the file and migrate to the single setting
-above.
+access to `.env` like the original PEM and never commit either one. The value
+must remain one unwrapped line of standard Base64; Codegen rejects wrapped,
+malformed, or non-UTF-8 values. Regenerate it with the command above if
+validation fails.
 
 When enabling the webhook, generate its signing secret independently:
 
