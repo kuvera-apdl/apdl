@@ -168,12 +168,3 @@ class ProjectConnectionStore:
                 connection = _connection(connection_row)
                 models = self._models(rows)
         return connection, models
-
-    async def models(
-        self,
-        project_id: str,
-        provider: str,
-    ) -> tuple[ProviderModel, ...]:
-        """Return the current inventory through one consistent snapshot."""
-        _, models = await self.get_active_with_models(project_id, provider)
-        return models
