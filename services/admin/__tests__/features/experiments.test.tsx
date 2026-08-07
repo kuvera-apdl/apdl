@@ -888,18 +888,18 @@ describe('ExperimentForm layout', () => {
 
     const headings = within(screen.getByTestId('variant-column-headings'))
     expect(headings.getByText('Key')).toBeInTheDocument()
-    expect(headings.getByText('User proportion')).toBeInTheDocument()
+    expect(headings.getByText('Relative Weight')).toBeInTheDocument()
     expect(headings.getByText('Comment')).toBeInTheDocument()
 
     expect(screen.getByRole('textbox', { name: 'Key for variant 1' })).toHaveValue('control')
-    expect(screen.getByRole('spinbutton', { name: 'User proportion for variant 1' })).toHaveValue(1)
+    expect(screen.getByRole('spinbutton', { name: 'Relative Weight for variant 1' })).toHaveValue(1)
     expect(screen.getByRole('textbox', { name: 'Comment for variant 1' })).toHaveValue('')
     expect(screen.getByRole('button', { name: 'Remove variant 1' })).toBeDisabled()
 
     await userEvent.click(screen.getByRole('button', { name: 'Add variant' }))
 
     expect(screen.getByRole('textbox', { name: 'Key for variant 3' })).toBeVisible()
-    expect(screen.getByRole('spinbutton', { name: 'User proportion for variant 3' })).toHaveValue(1)
+    expect(screen.getByRole('spinbutton', { name: 'Relative Weight for variant 3' })).toHaveValue(1)
     expect(screen.getByRole('textbox', { name: 'Comment for variant 3' })).toHaveValue('')
     expect(screen.getByRole('button', { name: 'Remove variant 3' })).toBeEnabled()
 

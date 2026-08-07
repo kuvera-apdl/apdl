@@ -572,7 +572,7 @@ export function ExperimentForm({
             data-testid="variant-column-headings"
           >
             <span className="text-sm font-medium leading-none">Key</span>
-            <span className="text-sm font-medium leading-none">User proportion</span>
+            <span className="text-sm font-medium leading-none">Relative Weight</span>
             <span className="text-sm font-medium leading-none">Comment</span>
             <span aria-hidden="true" />
           </div>
@@ -596,8 +596,8 @@ export function ExperimentForm({
               </div>
               <div className="space-y-1.5">
                 <Label htmlFor={`${variantFieldsId}-${index}-weight`} className="sm:sr-only">
-                  <span aria-hidden="true">User proportion</span>
-                  <span className="sr-only">User proportion for variant {index + 1}</span>
+                  <span aria-hidden="true">Relative Weight</span>
+                  <span className="sr-only">Relative Weight for variant {index + 1}</span>
                 </Label>
                 <Input
                   id={`${variantFieldsId}-${index}-weight`}
